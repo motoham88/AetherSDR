@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25)
 project(AetherSDR VERSION 26.5.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
+
+option(LOWER_CASE_BINARY_NAME "Make the output binary lower case. Only affects Linux" OFF)
 
 # macOS: ensure Homebrew lib/include paths are in the search path
 # (universal builds with CMAKE_OSX_ARCHITECTURES may not search /opt/homebrew by default)
@@ -840,6 +842,20 @@ endif()  # NOT MSVC
 qt_add_resources(RESOURCES resources/resources.qrc)
 
 add_executable(AetherSDR ${ALL_SOURCES} ${RNNOISE_SOURCES} ${GGMORSE_SOURCES} ${RADE_SOURCES} ${BNR_SOURCES} ${SPECBLEACH_SOURCES} ${RESOURCES})
+
+# Optionally change binary name to lower case on Linux
+if (LINUX AND LOWER_CASE_BINARY_NAME)
+    set_target_properties(AetherSDR PROPERTIES OUTPUT_NAME aethersdr)
+
+    set(AETHERSDR_OUTPUT_BINARY_NAME aethersdr)
+else()
+    set(AETHERSDR_OUTPUT_BINARY_NAME AetherSDR)
+endif()
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/AetherSDR.desktop.in
+    ${CMAKE_CURRENT_BINARY_DIR}/packaging/linux/AetherSDR.desktop
+    @ONLY
+)
 
 # Capture the git short SHA at configure time and surface it in the About
 # dialog so dev/test builds are identifiable.  Falls back to "unknown" for
@@ -1900,7 +1916,7 @@ else()
     install(TARGETS AetherSDR
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
-    install(FILES packaging/linux/AetherSDR.desktop
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/packaging/linux/AetherSDR.desktop
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
     )
     install(FILES docs/assets/logo-circle-256.png
