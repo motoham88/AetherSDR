@@ -8248,7 +8248,15 @@ void MainWindow::buildMenuBar()
     });
     helpMenu->addAction("Slice Troubleshooting...", this, [this]() {
         SliceTroubleshootingDialog dlg(&m_radioModel, m_audio, this,
-                                       [this]() { return buildControlDevicesSnapshot(); });
+                                       [this]() { return buildControlDevicesSnapshot(); },
+                                       [this]() {
+                                           QJsonObject renderer;
+                                           renderer["available"] = true;
+                                           renderer["description"] = spectrum()
+                                               ? spectrum()->rendererDescription()
+                                               : QStringLiteral("No active pan");
+                                           return renderer;
+                                       });
         dlg.exec();
     });
     helpMenu->addSeparator();
