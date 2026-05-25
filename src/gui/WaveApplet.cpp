@@ -4,6 +4,7 @@
 #include "GuardedSlider.h"
 #include "WaveformWidget.h"
 #include "core/AppSettings.h"
+#include "core/SettingsHelpers.h"
 
 #include <QComboBox>
 #include <QFrame>
@@ -256,13 +257,16 @@ void WaveApplet::buildSettingsDrawer()
         m_zoomValue->setStyleSheet(AetherSDR::ThemeManager::instance().resolve("QLabel { color: {{color.text.primary}}; font-size: 10px; }"));
         row->addWidget(m_zoomValue);
 
-        connect(m_zoomSlider, &QSlider::valueChanged, this, [this](int value) {
-            m_waveform->setAmplitudeZoom(value / 100.0f);
-            updateZoomLabel();
-            auto& settings = AppSettings::instance();
-            settings.setValue("WaveApplet_ZoomPercent", value);
-            settings.save();
-        });
+        connectSliderSetting(m_zoomSlider,
+            [this](int value) {
+                m_waveform->setAmplitudeZoom(value / 100.0f);
+                updateZoomLabel();
+            },
+            [](int value) {
+                auto& settings = AppSettings::instance();
+                settings.setValue("WaveApplet_ZoomPercent", value);
+                settings.save();
+            });
 
         drawer->addLayout(row);
     }
@@ -287,13 +291,16 @@ void WaveApplet::buildSettingsDrawer()
         m_refreshValue->setStyleSheet(AetherSDR::ThemeManager::instance().resolve("QLabel { color: {{color.text.primary}}; font-size: 10px; }"));
         row->addWidget(m_refreshValue);
 
-        connect(m_refreshSlider, &QSlider::valueChanged, this, [this](int value) {
-            m_waveform->setRefreshRateHz(value);
-            updateRefreshLabel();
-            auto& settings = AppSettings::instance();
-            settings.setValue("WaveApplet_RefreshRateHz", value);
-            settings.save();
-        });
+        connectSliderSetting(m_refreshSlider,
+            [this](int value) {
+                m_waveform->setRefreshRateHz(value);
+                updateRefreshLabel();
+            },
+            [](int value) {
+                auto& settings = AppSettings::instance();
+                settings.setValue("WaveApplet_RefreshRateHz", value);
+                settings.save();
+            });
 
         drawer->addLayout(row);
     }
@@ -320,14 +327,18 @@ void WaveApplet::buildSettingsDrawer()
         m_windowValue->setStyleSheet(AetherSDR::ThemeManager::instance().resolve("QLabel { color: {{color.text.primary}}; font-size: 10px; }"));
         row->addWidget(m_windowValue);
 
-        connect(m_windowSlider, &QSlider::valueChanged, this, [this](int idx) {
-            const int ms = windowStepsMs().value(idx, 1000);
-            m_waveform->setZoomWindowMs(ms);
-            updateWindowLabel();
-            auto& settings = AppSettings::instance();
-            settings.setValue("WaveApplet_TimeWindowMs", QString::number(ms));
-            settings.save();
-        });
+        connectSliderSetting(m_windowSlider,
+            [this](int idx) {
+                const int ms = windowStepsMs().value(idx, 1000);
+                m_waveform->setZoomWindowMs(ms);
+                updateWindowLabel();
+            },
+            [](int idx) {
+                const int ms = windowStepsMs().value(idx, 1000);
+                auto& settings = AppSettings::instance();
+                settings.setValue("WaveApplet_TimeWindowMs", QString::number(ms));
+                settings.save();
+            });
 
         drawer->addLayout(row);
     }
