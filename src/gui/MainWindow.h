@@ -550,8 +550,11 @@ private:
     bool                 m_flexVirtualSegmentZoomOn{false};
 #ifdef HAVE_HIDAPI
     HidEncoderManager*   m_hidEncoder{nullptr};
-    QTimer               m_hidCoalesceTimer;
-    int                  m_hidPendingSteps{0};
+    static QString hidEncoderDefaultAction(int encoderIndex);
+    static QString hidEncoderDefaultPushAction(int encoderIndex);
+    void refreshStreamDeckLabels();
+    QMetaObject::Connection m_sdRitConn;
+    QMetaObject::Connection m_sdXitConn;
 #endif
 #ifdef Q_OS_LINUX
     EvdevEncoderManager*       m_dialBackend{nullptr};

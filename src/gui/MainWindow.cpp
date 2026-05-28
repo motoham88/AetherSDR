@@ -141,6 +141,9 @@
 #include <QHelpEvent>
 #include <QWindow>
 #include <QPixmap>
+#include <QImage>
+#include <QBuffer>
+#include <QFont>
 #include <QWidgetAction>
 #include <QPainter>
 #include <QVBoxLayout>
@@ -3916,53 +3919,146 @@ MainWindow::MainWindow(QWidget* parent)
     m_hidEncoder = new HidEncoderManager;
     m_hidEncoder->moveToThread(m_extCtrlThread);
 
-    // HID encoder coalesce timer — same 20ms pattern as FlexControl
-    m_hidCoalesceTimer.setSingleShot(true);
-    m_hidCoalesceTimer.setInterval(20);
-    connect(&m_hidCoalesceTimer, &QTimer::timeout, this, [this]() {
-        if (m_hidPendingSteps == 0) return;
-        auto* s = activeSlice();
-        if (!s) { m_hidPendingSteps = 0; return; }
-        if (s->isLocked()) {
-            s->notifyTuneBlockedByLock();
-            m_hidPendingSteps = 0;
-            return;
-        }
-        int stepHz = spectrum() ? spectrum()->stepSize() : 100;
-        double newMhz = s->frequency() + m_hidPendingSteps * stepHz / 1e6;
-        m_hidPendingSteps = 0;
-        applyTuneRequest(s, newMhz, TuneIntent::IncrementalTune, "hid-encoder");
-    });
-
+    // Per-encoder action dispatch — routes each dial to its configured action.
+    // applyFlexControlWheelAction handles coalescing internally for frequency.
     connect(m_hidEncoder, &HidEncoderManager::tuneSteps,
-            this, [this](int steps) {
-        m_hidPendingSteps += steps;
-        if (!m_hidCoalesceTimer.isActive())
-            m_hidCoalesceTimer.start();
+            this, [this](int encoderIndex, int steps) {
+        const QString actionId = AppSettings::instance()
+            .value(QString("HidEncoderAction%1").arg(encoderIndex),
+                   MainWindow::hidEncoderDefaultAction(encoderIndex))
+            .toString();
+        applyFlexControlWheelAction(actionId, steps);
     });
 
     connect(m_hidEncoder, &HidEncoderManager::buttonPressed,
             this, [this](int button, int action) {
-        // Reuse same action dispatch as FlexControl
-        QString key = QString("HidEncoderBtn%1Action%2").arg(button).arg(action);
-        QString actionName = AppSettings::instance().value(key, "None").toString();
-        if (actionName == "ToggleMox")
+        // Only fire on press; release is suppressed.
+        if (action != 0) return;
+
+        QString actionName;
+        if (button >= 1 && button <= 8) {
+            // LCD keys — settings key HidKeyAction{0-7}
+            actionName = AppSettings::instance()
+                .value(QString("HidKeyAction%1").arg(button - 1), QStringLiteral("None"))
+                .toString();
+        } else if (button >= 9 && button <= 12) {
+            // Encoder press buttons — settings key HidEncoderPushAction{0-3}
+            const int enc = button - 9;
+            actionName = AppSettings::instance()
+                .value(QString("HidEncoderPushAction%1").arg(enc),
+                       MainWindow::hidEncoderDefaultPushAction(enc))
+                .toString();
+        } else {
+            return;
+        }
+
+        if (actionName == "None" || actionName.isEmpty()) return;
+
+        if (actionName == "StepCycle" || actionName == "StepUp") {
+            if (auto* rx = m_appletPanel->rxApplet()) rx->cycleStepUp();
+        } else if (actionName == "StepDown") {
+            if (auto* rx = m_appletPanel->rxApplet()) rx->cycleStepDown();
+        } else if (actionName == "ToggleRit") {
+            if (auto* s = activeSlice()) s->setRit(!s->ritOn(), s->ritFreq());
+        } else if (actionName == "ToggleXit") {
+            if (auto* s = activeSlice()) s->setXit(!s->xitOn(), s->xitFreq());
+        } else if (actionName == "ClearRit") {
+            if (auto* s = activeSlice()) s->setRit(s->ritOn(), 0);
+        } else if (actionName == "ClearXit") {
+            if (auto* s = activeSlice()) s->setXit(s->xitOn(), 0);
+        } else if (actionName == "ToggleMox") {
             m_radioModel.setTransmit(!m_radioModel.transmitModel().isTransmitting());
-        else if (actionName == "ToggleTune") {
+        } else if (actionName == "ToggleTune") {
             if (m_radioModel.transmitModel().isTuning())
                 m_radioModel.transmitModel().stopTune();
             else
                 m_radioModel.transmitModel().startTune();
-        } else if (actionName == "ToggleMute")
+        } else if (actionName == "ToggleMute") {
             m_audio->setMuted(!m_audio->isMuted());
-        else if (actionName == "ToggleLock") {
+        } else if (actionName == "ToggleLock") {
             if (auto* s = activeSlice()) s->setLocked(!s->isLocked());
+        } else if (actionName == "ToggleApf") {
+            if (auto* s = activeSlice()) s->setApf(!s->apfOn());
+        } else if (actionName == "ToggleAgc") {
+            if (auto* s = activeSlice()) {
+                static const char* modes[] = {"off","slow","med","fast"};
+                const QString cur = s->agcMode().toLower();
+                int idx = 0;
+                for (int i = 0; i < 4; ++i) if (cur == modes[i]) { idx = i; break; }
+                s->setAgcMode(modes[(idx + 1) % 4]);
+            }
+        } else if (actionName == "BandZoom") {
+            auto* s = activeSlice();
+            if (s) {
+                const QString panId = !s->panId().isEmpty() ? s->panId()
+                    : (m_panStack ? m_panStack->activePanId() : m_radioModel.panId());
+                if (!panId.isEmpty()) {
+                    m_flexVirtualBandZoomOn = !m_flexVirtualBandZoomOn;
+                    m_radioModel.sendCommand(QString("display pan set %1 band_zoom=%2")
+                        .arg(panId).arg(m_flexVirtualBandZoomOn ? 1 : 0));
+                }
+            }
+        } else if (actionName == "SegmentZoom") {
+            auto* s = activeSlice();
+            if (s) {
+                const QString panId = !s->panId().isEmpty() ? s->panId()
+                    : (m_panStack ? m_panStack->activePanId() : m_radioModel.panId());
+                if (!panId.isEmpty()) {
+                    m_flexVirtualSegmentZoomOn = !m_flexVirtualSegmentZoomOn;
+                    m_radioModel.sendCommand(QString("display pan set %1 segment_zoom=%2")
+                        .arg(panId).arg(m_flexVirtualSegmentZoomOn ? 1 : 0));
+                }
+            }
+        } else if (actionName == "NextSlice") {
+            const auto& slices = m_radioModel.slices();
+            if (slices.size() > 1) {
+                int idx = 0;
+                for (int i = 0; i < slices.size(); ++i)
+                    if (slices[i]->sliceId() == m_activeSliceId) { idx = i; break; }
+                setActiveSlice(slices[(idx + 1) % slices.size()]->sliceId());
+            }
+        } else if (actionName == "PrevSlice") {
+            const auto& slices = m_radioModel.slices();
+            if (slices.size() > 1) {
+                int idx = 0;
+                for (int i = 0; i < slices.size(); ++i)
+                    if (slices[i]->sliceId() == m_activeSliceId) { idx = i; break; }
+                setActiveSlice(slices[(idx - 1 + slices.size()) % slices.size()]->sliceId());
+            }
+        } else if (actionName == "VolumeUp") {
+            const int next = std::clamp(
+                AppSettings::instance().value("MasterVolume","100").toInt() + 5, 0, 100);
+            if (m_titleBar) m_titleBar->setMasterVolume(next);
+            applyMasterVolume(next);
+        } else if (actionName == "VolumeDown") {
+            const int next = std::clamp(
+                AppSettings::instance().value("MasterVolume","100").toInt() - 5, 0, 100);
+            if (m_titleBar) m_titleBar->setMasterVolume(next);
+            applyMasterVolume(next);
+        } else if (actionName == "SplitActiveSlice") {
+            if (!m_splitActive) {
+                auto* s = activeSlice();
+                if (s && m_radioModel.slices().size() < m_radioModel.maxSlices()) {
+                    QString panId = s->panId().isEmpty()
+                        ? (m_panStack ? m_panStack->activePanId() : m_radioModel.panId())
+                        : s->panId();
+                    const bool isCw = s->mode() == "CW" || s->mode() == "CWL";
+                    m_splitActive   = true;
+                    m_splitRxSliceId = s->sliceId();
+                    m_radioModel.sendCommand(
+                        QString("slice create pan=%1 freq=%2")
+                        .arg(panId).arg(s->frequency() + (isCw ? 0.001 : 0.005), 0, 'f', 6));
+                }
+            } else {
+                disableSplit();
+            }
         }
     });
 
     connect(m_hidEncoder, &HidEncoderManager::connectionChanged,
-            this, [](bool connected, const QString& name) {
+            this, [this](bool connected, const QString& name) {
         qDebug() << "HID encoder:" << (connected ? "connected" : "disconnected") << name;
+        if (connected) refreshStreamDeckLabels();
     });
 
     // StreamDeck native integration removed — use TCI StreamController plugin instead.
@@ -5585,6 +5681,9 @@ void MainWindow::wireRadioSetupDialogSignals(RadioSetupDialog* dlg, const QStrin
         if (m_flexControlDialog)
             m_flexControlDialog->refreshButtonActions();
         syncFlexControlIndicatorForSettings();
+#ifdef HAVE_HIDAPI
+        refreshStreamDeckLabels();
+#endif
     });
     dlg->setFlexControlConnectionStatus(
         m_flexControlConnected,
@@ -6556,6 +6655,232 @@ void MainWindow::handleVirtualFlexControlWheel(const QString& actionId, int step
 {
     applyFlexControlWheelAction(actionId, steps);
 }
+
+// static
+QString MainWindow::hidEncoderDefaultAction(int encoderIndex)
+{
+    switch (encoderIndex) {
+    case 0:  return QStringLiteral("WheelFrequency");
+    case 1:  return QStringLiteral("WheelRit");
+    case 2:  return QStringLiteral("WheelXit");
+    case 3:  return QStringLiteral("WheelVolume");
+    default: return QStringLiteral("WheelFrequency");
+    }
+}
+
+// static
+QString MainWindow::hidEncoderDefaultPushAction(int encoderIndex)
+{
+    switch (encoderIndex) {
+    case 0:  return QStringLiteral("StepCycle");  // tuning encoder push → cycle step size
+    case 1:  return QStringLiteral("ToggleRit");
+    case 2:  return QStringLiteral("ToggleXit");
+    case 3:  return QStringLiteral("None");
+    default: return QStringLiteral("None");
+    }
+}
+
+#ifdef HAVE_HIDAPI
+// Render the full 800x100 touchscreen strip for the StreamDeck+.
+// Four equal 200x100 sections, one per encoder. Each section shows the turn
+// action on the top half and the push action + state on the bottom half.
+static QByteArray renderTouchscreenJpeg(
+    const std::array<QString,4>& turnLabels,
+    const std::array<QString,4>& pushLabels,
+    const std::array<QString,4>& stateTexts,
+    const std::array<bool,4>&    active)
+{
+    constexpr int W = 800, H = 100, COLS = 4, COL_W = W / COLS;
+
+    QImage img(W, H, QImage::Format_RGB32);
+    img.fill(QColor(15, 15, 20));
+
+    QPainter p(&img);
+    p.setRenderHint(QPainter::TextAntialiasing);
+
+    for (int i = 0; i < COLS; ++i) {
+        const int x = i * COL_W;
+
+        // Top half: turn action — dark blue tint
+        p.fillRect(x, 0, COL_W - 1, 49, QColor(18, 28, 52));
+
+        // Bottom half: push action — color indicates state
+        QColor pushBg;
+        if (active[i])                                       pushBg = QColor(10, 70, 10);
+        else if (pushLabels[i].isEmpty())                    pushBg = QColor(12, 12, 16);
+        else                                                 pushBg = QColor(45, 18, 18);
+        p.fillRect(x, 51, COL_W - 1, H - 51, pushBg);
+
+        // Divider line (1px, slightly lighter)
+        p.fillRect(x + COL_W - 1, 0, 1, H, QColor(40, 40, 50));
+        // Horizontal divider between top/bottom halves
+        p.fillRect(x, 49, COL_W - 1, 2, QColor(35, 35, 45));
+
+        // Turn label
+        if (!turnLabels[i].isEmpty()) {
+            QFont f;
+            f.setPixelSize(20);
+            f.setBold(true);
+            p.setFont(f);
+            p.setPen(Qt::white);
+            p.drawText(QRect(x + 2, 0, COL_W - 4, 49), Qt::AlignCenter, turnLabels[i]);
+        }
+
+        // Push label + state
+        if (!pushLabels[i].isEmpty()) {
+            QFont f;
+            f.setPixelSize(16);
+            f.setBold(active[i]);
+            p.setFont(f);
+            const QString line = stateTexts[i].isEmpty()
+                ? pushLabels[i]
+                : pushLabels[i] + QLatin1String("  ") + stateTexts[i];
+            p.setPen(active[i] ? QColor(120, 255, 120) : QColor(200, 200, 200));
+            p.drawText(QRect(x + 2, 51, COL_W - 4, H - 51), Qt::AlignCenter, line);
+        }
+    }
+
+    p.end();
+
+    QByteArray bytes;
+    QBuffer buf(&bytes);
+    buf.open(QIODevice::WriteOnly);
+    img.save(&buf, "JPEG", 92);
+    return bytes;
+}
+
+// Render a 120x120 JPEG label for a single StreamDeck+ LCD key.
+static QByteArray renderKeyImageJpeg(const QString& label, const QColor& bg)
+{
+    QImage img(120, 120, QImage::Format_RGB32);
+    img.fill(bg);
+
+    if (!label.isEmpty()) {
+        QPainter p(&img);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        QFont f;
+        f.setPixelSize(label.length() > 6 ? 22 : 28);
+        f.setBold(true);
+        p.setFont(f);
+        p.setPen(Qt::white);
+        p.drawText(QRect(4, 4, 112, 112), Qt::AlignCenter | Qt::TextWordWrap, label);
+    }
+
+    QByteArray bytes;
+    QBuffer buf(&bytes);
+    buf.open(QIODevice::WriteOnly);
+    img.save(&buf, "JPEG", 90);
+    return bytes;
+}
+
+void MainWindow::refreshStreamDeckLabels()
+{
+    if (!m_hidEncoder || !m_hidEncoder->isOpen() || !m_hidEncoder->isStreamDeckPlus())
+        return;
+
+    static const QHash<QString, QString> kShortLabels{
+        {QStringLiteral("WheelFrequency"),      QStringLiteral("TUNE")},
+        {QStringLiteral("WheelRit"),            QStringLiteral("RIT")},
+        {QStringLiteral("WheelXit"),            QStringLiteral("XIT")},
+        {QStringLiteral("WheelVolume"),         QStringLiteral("VOL")},
+        {QStringLiteral("WheelHeadphoneVolume"),QStringLiteral("H.VOL")},
+        {QStringLiteral("WheelAgcT"),           QStringLiteral("AGC-T")},
+        {QStringLiteral("WheelApf"),            QStringLiteral("APF")},
+        {QStringLiteral("WheelCwSpeed"),        QStringLiteral("CW SPD")},
+        {QStringLiteral("WheelPower"),          QStringLiteral("RF PWR")},
+        {QStringLiteral("StepCycle"),           QStringLiteral("STEP")},
+        {QStringLiteral("ToggleRit"),           QStringLiteral("RIT")},
+        {QStringLiteral("ToggleXit"),           QStringLiteral("XIT")},
+        {QStringLiteral("ToggleMox"),           QStringLiteral("MOX")},
+        {QStringLiteral("ToggleMute"),          QStringLiteral("MUTE")},
+        {QStringLiteral("ToggleLock"),          QStringLiteral("LOCK")},
+        {QStringLiteral("None"),                {}},
+    };
+
+    static const char* kTurnDflt[4] = {"WheelFrequency","WheelRit","WheelXit","WheelVolume"};
+    static const char* kPushDflt[4] = {"StepCycle","ToggleRit","ToggleXit","None"};
+
+    auto& settings = AppSettings::instance();
+    auto* slice    = activeSlice();
+    const bool ritOn = slice && slice->ritOn();
+    const bool xitOn = slice && slice->xitOn();
+
+    std::array<QString,4> turnLabels, pushLabels, stateTexts;
+    std::array<bool,4> activeFlags{};
+
+    for (int i = 0; i < 4; ++i) {
+        const QString turnId = settings.value(QString("HidEncoderAction%1").arg(i),
+                                              QString::fromLatin1(kTurnDflt[i])).toString();
+        turnLabels[i] = kShortLabels.value(turnId, turnId.left(6).toUpper());
+
+        const QString pushId = settings.value(QString("HidEncoderPushAction%1").arg(i),
+                                              QString::fromLatin1(kPushDflt[i])).toString();
+        pushLabels[i] = kShortLabels.value(pushId, pushId.left(6).toUpper());
+
+        if (pushId == QLatin1String("ToggleRit")) {
+            activeFlags[i] = ritOn;
+            stateTexts[i]  = ritOn ? QStringLiteral("ON") : QStringLiteral("OFF");
+        } else if (pushId == QLatin1String("ToggleXit")) {
+            activeFlags[i] = xitOn;
+            stateTexts[i]  = xitOn ? QStringLiteral("ON") : QStringLiteral("OFF");
+        }
+        // StepCycle and others: no state text, not "active"
+    }
+
+    QByteArray tsImg = renderTouchscreenJpeg(turnLabels, pushLabels, stateTexts, activeFlags);
+
+    // Build labeled 120x120 images for the 8 LCD keys
+    static const QHash<QString, QColor> kKeyBgColors{
+        {QStringLiteral("ToggleMox"),        QColor(70, 20, 20)},
+        {QStringLiteral("ToggleTune"),       QColor(70, 20, 20)},
+        {QStringLiteral("ToggleRit"),        QColor(20, 55, 20)},
+        {QStringLiteral("ToggleXit"),        QColor(20, 55, 20)},
+        {QStringLiteral("ClearRit"),         QColor(20, 40, 20)},
+        {QStringLiteral("ClearXit"),         QColor(20, 40, 20)},
+        {QStringLiteral("VolumeUp"),         QColor(40, 20, 60)},
+        {QStringLiteral("VolumeDown"),       QColor(40, 20, 60)},
+        {QStringLiteral("SplitActiveSlice"), QColor(60, 40, 10)},
+    };
+    static const QHash<QString, QString> kKeyShortLabels{
+        {QStringLiteral("None"),             {}},
+        {QStringLiteral("ToggleMox"),        QStringLiteral("MOX")},
+        {QStringLiteral("ToggleTune"),       QStringLiteral("TUNE")},
+        {QStringLiteral("ToggleRit"),        QStringLiteral("RIT")},
+        {QStringLiteral("ToggleXit"),        QStringLiteral("XIT")},
+        {QStringLiteral("ClearRit"),         QStringLiteral("CLR\nRIT")},
+        {QStringLiteral("ClearXit"),         QStringLiteral("CLR\nXIT")},
+        {QStringLiteral("StepUp"),           QStringLiteral("STEP\nUP")},
+        {QStringLiteral("StepDown"),         QStringLiteral("STEP\nDN")},
+        {QStringLiteral("ToggleMute"),       QStringLiteral("MUTE")},
+        {QStringLiteral("ToggleLock"),       QStringLiteral("LOCK")},
+        {QStringLiteral("ToggleApf"),        QStringLiteral("APF")},
+        {QStringLiteral("ToggleAgc"),        QStringLiteral("AGC")},
+        {QStringLiteral("BandZoom"),         QStringLiteral("BAND\nZOOM")},
+        {QStringLiteral("SegmentZoom"),      QStringLiteral("SEG\nZOOM")},
+        {QStringLiteral("NextSlice"),        QStringLiteral("NEXT\nSLICE")},
+        {QStringLiteral("PrevSlice"),        QStringLiteral("PREV\nSLICE")},
+        {QStringLiteral("VolumeUp"),         QStringLiteral("VOL +")},
+        {QStringLiteral("VolumeDown"),       QStringLiteral("VOL -")},
+        {QStringLiteral("SplitActiveSlice"), QStringLiteral("SPLIT")},
+    };
+    const QColor kDefaultKeyBg(20, 28, 45);
+
+    QVector<QByteArray> keyImages(8);
+    for (int i = 0; i < 8; ++i) {
+        const QString actionId = settings.value(QString("HidKeyAction%1").arg(i),
+                                                QStringLiteral("None")).toString();
+        const QString lbl = kKeyShortLabels.value(actionId, actionId.left(8).toUpper());
+        const QColor  bg  = kKeyBgColors.value(actionId, kDefaultKeyBg);
+        keyImages[i] = renderKeyImageJpeg(lbl, bg);
+    }
+
+    QMetaObject::invokeMethod(m_hidEncoder,
+        [enc=m_hidEncoder, ts=tsImg, keys=keyImages]() {
+            enc->setTouchscreenImage(ts);
+            enc->setKeyImages(keys);
+        }, Qt::QueuedConnection);
+}
+#endif
 
 void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
 {
@@ -10571,9 +10896,8 @@ void MainWindow::onSliceAdded(SliceModel* s)
 #ifdef HAVE_SERIALPORT
         activeTuning = activeTuning || m_flexCoalesceTimer.isActive();
 #endif
-#ifdef HAVE_HIDAPI
-        activeTuning = activeTuning || m_hidCoalesceTimer.isActive();
-#endif
+        // HID encoder frequency tuning routes through applyFlexControlWheelAction,
+        // so m_flexCoalesceTimer above already covers it.
         const bool memoryRevealPending = (m_pendingMemoryRevealSliceId == s->sliceId());
         if (activeTuning && s->sliceId() == m_activeSliceId && !memoryRevealPending)
             return;
@@ -11351,6 +11675,15 @@ void MainWindow::setActiveSliceInternal(int sliceId, bool revealOffscreen)
 
     // Update MEM button target-slice badge on every overlay (#1781)
     refreshMemoryBrowsePanel();
+
+#ifdef HAVE_HIDAPI
+    // Rewire StreamDeck+ RIT/XIT state triggers when the active slice changes
+    disconnect(m_sdRitConn);
+    disconnect(m_sdXitConn);
+    m_sdRitConn = connect(s, &SliceModel::ritChanged, this, [this](bool, int){ refreshStreamDeckLabels(); });
+    m_sdXitConn = connect(s, &SliceModel::xitChanged, this, [this](bool, int){ refreshStreamDeckLabels(); });
+    if (sliceId != prevId) refreshStreamDeckLabels();
+#endif
 
     qDebug() << "MainWindow: active slice set to" << sliceId;
 }

@@ -17,6 +17,8 @@ static const HidDeviceId kSupportedDevices[] = {
     // protocol; validated against PR #2870's report-layout fix
     // (end-to-end test 2026-05-20).
     {0x2341, 0x0266, "AetherPad RC-28 emulator (Arduino Giga R1)"},
+    // Elgato StreamDeck+ — 8 LCD buttons + 4 encoder dials (#1510)
+    {0x0FD9, 0x0084, "Elgato StreamDeck+"},
 };
 
 const HidDeviceId* HidDeviceParser::supportedDevices() { return kSupportedDevices; }
@@ -31,6 +33,7 @@ std::unique_ptr<HidDeviceParser> HidDeviceParser::create(uint16_t vid, uint16_t 
     // AetherPad emulator alias — same parser as the real RC-28 (see
     // comment in kSupportedDevices above).
     if (vid == 0x2341 && pid == 0x0266) return std::make_unique<IcomRC28Parser>();
+    if (vid == 0x0FD9 && pid == 0x0084) return std::make_unique<StreamDeckPlusParser>();
     return nullptr;
 }
 
@@ -185,6 +188,78 @@ HidEvent ShuttleProV2Parser::parse(const uint8_t* buf, size_t len)
         if (delta < -128) delta += 256;
         m_prevJog = jog;
         return {HidEvent::Rotate, delta, 0, 0};
+    }
+
+    return {};
+}
+
+// ── Elgato StreamDeck+ ─────────────────────────────────────────────────────
+// 14-byte reports. hidapi always includes the report ID as buf[0] = 0x01.
+// Protocol verified against python-elgato-streamdeck v0.9.8 source:
+//   buf[0]  = 0x01 (report ID — strip it)
+//   buf[1]  = event type: 0x00=key, 0x02=touchscreen, 0x03=dial
+//   buf[2..3] = reserved
+//   Dial event (buf[1]==0x03):
+//     buf[4] = sub-type: 0x01=turn, 0x00=push
+//     buf[5..8] = 4 encoder values (signed int8 delta for turn, bool for push)
+//   Key event (buf[1]==0x00):
+//     buf[4..11] = 8 LCD key states (0=up, 1=down)
+// Button numbering: LCD keys 1-8, encoder press buttons 9-12.
+
+HidEvent StreamDeckPlusParser::parse(const uint8_t* buf, size_t len)
+{
+    if (len < 9) return {};
+
+    // buf[0] = report ID (0x01) — always present in hidraw reads on all platforms
+    const uint8_t type    = buf[1];
+    const uint8_t subtype = buf[4];
+
+    if (type == 0x03) {
+        if (subtype == 0x01) {
+            // Encoder turn — return first non-zero delta
+            for (int i = 0; i < 4; ++i) {
+                int delta = static_cast<int>(static_cast<int8_t>(buf[5 + i]));
+                if (delta != 0)
+                    return {.type = HidEvent::Rotate, .steps = delta, .encoderIndex = i};
+            }
+        } else if (subtype == 0x00) {
+            // Encoder push — return first changed encoder button
+            uint8_t newState = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (buf[5 + i]) newState |= (1u << i);
+            }
+            uint8_t changed = newState ^ m_prevEncBtns;
+            if (changed) {
+                m_prevEncBtns = newState;
+                for (int i = 0; i < 4; ++i) {
+                    if (changed & (1u << i)) {
+                        const int act = (newState & (1u << i)) ? 0 : 1;
+                        return {.type = HidEvent::Button, .button = 9 + i, .action = act};
+                    }
+                }
+            }
+        }
+        return {};
+    }
+
+    if (type == 0x00) {
+        // LCD key — return first changed key
+        if (len < 12) return {};
+        uint8_t newState = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (buf[4 + i]) newState |= (1u << i);
+        }
+        uint8_t changed = newState ^ m_prevKeys;
+        if (changed) {
+            m_prevKeys = newState;
+            for (int i = 0; i < 8; ++i) {
+                if (changed & (1u << i)) {
+                    const int act = (newState & (1u << i)) ? 0 : 1;
+                    return {.type = HidEvent::Button, .button = i + 1, .action = act};
+                }
+            }
+        }
+        return {};
     }
 
     return {};

@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QByteArray>
 #include <memory>
 #include <hidapi/hidapi.h>
 #include "HidDeviceParser.h"
@@ -29,14 +30,26 @@ public:
     QString deviceName() const { return m_deviceName; }
     uint16_t vendorId() const { return m_openVid; }
     uint16_t productId() const { return m_openPid; }
+    int encoderCount() const { return m_parser ? m_parser->encoderCount() : 1; }
+    bool isStreamDeckPlus() const { return m_openVid == 0x0FD9 && m_openPid == 0x0084; }
 
     void setInvertDirection(bool invert) { m_invertDirection = invert; }
 
 public slots:
     void loadSettings();
+    // Write 120x120 JPEG images to StreamDeck+ LCD keys. Pass all 8 images at once
+    // so one queued call updates the whole display without flooding the event queue.
+    // No-op if device is not a StreamDeck+.
+    void setKeyImages(const QVector<QByteArray>& jpegImages);
+    void setKeyImage(int key, const QByteArray& jpegData);
+    // Write an 800x100 JPEG to the touchscreen strip above the dials.
+    // x_pos/y_pos/width/height let you update a sub-region; defaults write the full strip.
+    void setTouchscreenImage(const QByteArray& jpegData,
+                             int x_pos = 0, int y_pos = 0,
+                             int width = 800, int height = 100);
 
 signals:
-    void tuneSteps(int steps);
+    void tuneSteps(int encoderIndex, int steps);
     void buttonPressed(int button, int action);
     void connectionChanged(bool connected, const QString& deviceName);
 
