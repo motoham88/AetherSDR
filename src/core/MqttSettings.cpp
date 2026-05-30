@@ -289,6 +289,11 @@ QStringList internalMqttSubscriptionTopics()
     };
 }
 
+QStringList internalMqttPublishTopics()
+{
+    return { QString(kCwDecodeTopic) };
+}
+
 QStringList mqttSubscriptionTopics(const QStringList& userTopics)
 {
     QStringList allTopics;

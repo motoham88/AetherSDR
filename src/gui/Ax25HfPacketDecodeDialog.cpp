@@ -48,6 +48,14 @@ constexpr int kTxDaxSettleMs = 150;
 constexpr int kTxLeadMs = 200;
 constexpr int kTxTailMs = 250;
 constexpr int kTxChunkMs = 20;
+// TX jitter buffer: how far ahead of real time we keep the radio's TX FIFO.
+// The pacer runs on the GUI thread, which jitters under RX-decode / diagnostics
+// / render load (measured stalls of 40-55 ms). Front-loading this much audio
+// and then catch-up pacing keeps the FIFO from underrunning during those
+// stalls. Must comfortably exceed the worst pacer gap, and stay within the
+// radio's DAX TX buffer depth. Raise if clipping persists; lower if the FIFO
+// overflows.
+constexpr int kTxLeadBufferMs = 120;
 
 constexpr const char* kAetherModemStyle = R"(
 QWidget {
@@ -522,8 +530,8 @@ Ax25HfPacketDecodeDialog::Ax25HfPacketDecodeDialog(AudioEngine* audio,
     // 0x0094) render as "â" + two control glyphs, which is what shipped.
     auto* experimentalBanner = new QLabel(
         QStringLiteral("<b>Experimental — AX.25 modem bring-up.</b> "
-                       "300 baud HF RX/TX is active; 1200 baud VHF remains "
-                       "receive-focused while timing work continues."),
+                       "300 baud HF and 1200 baud VHF (Bell 202 / 2m APRS) "
+                       "AX.25 receive and transmit are active."),
         bodyWidget());
     experimentalBanner->setObjectName(QStringLiteral("ExperimentalBanner"));
     experimentalBanner->setWordWrap(true);
@@ -985,10 +993,6 @@ void Ax25HfPacketDecodeDialog::startTransmitFromUi()
     }
     if (!m_txText)
         return;
-    if (!m_hf300Profile || !m_hf300Profile->isChecked()) {
-        appendSystemLine(QStringLiteral("TX is enabled for the 300 baud HF profile in this pass."));
-        return;
-    }
     if (!m_audio || !m_radio) {
         appendSystemLine(QStringLiteral("TX unavailable: audio engine or radio model is not ready."));
         return;
@@ -1110,6 +1114,10 @@ void Ax25HfPacketDecodeDialog::beginTransmitWhenReady()
             appendSystemLine(QStringLiteral("Sending AX.25 AFSK audio: %1 chunks at %2 ms.")
                 .arg(m_txChunkCount)
                 .arg(kTxChunkMs));
+            m_txPaceClock.restart();
+            m_txPaceLastChunkMs = -1;
+            m_txPaceMaxGapMs = 0;
+            m_txPaceLateChunks = 0;
             paceTransmitAudio();
             if (m_txActive && m_txPaceTimer)
                 m_txPaceTimer->start();
@@ -1122,11 +1130,22 @@ void Ax25HfPacketDecodeDialog::paceTransmitAudio()
     if (!m_txActive || !m_audio)
         return;
 
-    const qsizetype bytesPerChunk = static_cast<qsizetype>(m_pendingTx.sampleRate)
-        * kTxChunkMs / 1000
-        * 2
-        * static_cast<qsizetype>(sizeof(float));
-    if (bytesPerChunk <= 0) {
+    // Measure scheduling gap between pacer ticks. The pacer wants to fire every
+    // kTxChunkMs; a much larger gap means the GUI thread stalled (heartbeat,
+    // 1 Hz diagnostics, RX decode, render) and the radio TX FIFO likely
+    // underran — the suspected cause of periodic AFSK corruption.
+    const qint64 nowMs = m_txPaceClock.isValid() ? m_txPaceClock.elapsed() : 0;
+    if (m_txPaceLastChunkMs >= 0) {
+        const qint64 gapMs = nowMs - m_txPaceLastChunkMs;
+        m_txPaceMaxGapMs = std::max(m_txPaceMaxGapMs, gapMs);
+        if (gapMs > 2 * kTxChunkMs)
+            ++m_txPaceLateChunks;
+    }
+    m_txPaceLastChunkMs = nowMs;
+
+    const qsizetype frameBytes = 2 * static_cast<qsizetype>(sizeof(float)); // stereo float32
+    const qsizetype bytesPerMs = static_cast<qsizetype>(m_pendingTx.sampleRate) * frameBytes / 1000;
+    if (bytesPerMs <= 0) {
         finishTransmit(true, QStringLiteral("invalid TX pacing chunk size"));
         return;
     }
@@ -1134,6 +1153,34 @@ void Ax25HfPacketDecodeDialog::paceTransmitAudio()
     if (m_txOffsetBytes >= m_txPcm.size()) {
         if (m_txPaceTimer)
             m_txPaceTimer->stop();
+
+        // Pacing health summary. With catch-up pacing, stretch <= ~1.0 means we
+        // kept up with real time and the radio FIFO stayed fed; stretch >> 1.0
+        // means even catch-up could not keep up (FIFO would underrun). maxGap /
+        // lateChunks still report raw GUI-thread jitter, but gaps smaller than
+        // kTxLeadBufferMs are absorbed by the lead cushion and are harmless.
+        const double audioMs = m_pendingTx.durationSeconds * 1000.0;
+        const qint64 wallMs = m_txPaceClock.isValid() ? m_txPaceClock.elapsed() : 0;
+        const double stretch = audioMs > 0.0 ? static_cast<double>(wallMs) / audioMs : 0.0;
+        qCInfo(lcAx25).noquote()
+            << QStringLiteral("AX.25 TX pacing summary: baud=%1 chunks=%2 audioMs=%3 wallMs=%4 "
+                              "stretch=%5x maxChunkGapMs=%6 lateChunks=%7 nominalChunkMs=%8")
+                .arg(m_shim->config().baud)
+                .arg(m_txChunkIndex)
+                .arg(audioMs, 0, 'f', 0)
+                .arg(wallMs)
+                .arg(stretch, 0, 'f', 2)
+                .arg(m_txPaceMaxGapMs)
+                .arg(m_txPaceLateChunks)
+                .arg(kTxChunkMs);
+        appendSystemLine(QStringLiteral(
+            "TX pacing: %1 chunks, audio %2 ms vs wall %3 ms (%4x), max gap %5 ms, late %6.")
+            .arg(m_txChunkIndex)
+            .arg(audioMs, 0, 'f', 0)
+            .arg(wallMs)
+            .arg(stretch, 0, 'f', 2)
+            .arg(m_txPaceMaxGapMs)
+            .arg(m_txPaceLateChunks));
         appendSystemLine(QStringLiteral("AX.25 TX audio queued; waiting %1 ms before unkey.")
             .arg(kTxTailMs));
         QTimer::singleShot(kTxTailMs, this, [this] {
@@ -1142,7 +1189,19 @@ void Ax25HfPacketDecodeDialog::paceTransmitAudio()
         return;
     }
 
-    const qsizetype sendBytes = std::min<qsizetype>(bytesPerChunk, m_txPcm.size() - m_txOffsetBytes);
+    // Catch-up pacing: keep the radio's TX FIFO filled to (real time elapsed +
+    // kTxLeadBufferMs). When a tick lands late this ships a larger chunk to
+    // refill the cushion; when we are already ahead it ships nothing and waits
+    // for real time to advance. This holds the average rate at real time (no
+    // chronic lag) while absorbing GUI-thread stalls up to the lead buffer.
+    const qsizetype targetBytes = bytesPerMs * (nowMs + kTxLeadBufferMs);
+    if (targetBytes <= m_txOffsetBytes)
+        return; // FIFO is far enough ahead; wait for the next tick.
+    qsizetype sendBytes = std::min<qsizetype>(targetBytes - m_txOffsetBytes,
+                                              m_txPcm.size() - m_txOffsetBytes);
+    sendBytes -= sendBytes % frameBytes; // keep stereo-frame aligned
+    if (sendBytes <= 0)
+        return;
     const QByteArray chunk = m_txPcm.mid(m_txOffsetBytes, sendBytes);
     m_txOffsetBytes += sendBytes;
     ++m_txChunkIndex;
@@ -1362,9 +1421,8 @@ void Ax25HfPacketDecodeDialog::refreshTransmitControls()
     if (!m_txButton)
         return;
 
-    const bool hfTx = m_hf300Profile && m_hf300Profile->isChecked();
     const bool hasText = m_txText && !m_txText->text().trimmed().isEmpty();
-    const bool ready = hfTx && hasText && !m_txActive && !m_txPendingStream;
+    const bool ready = hasText && !m_txActive && !m_txPendingStream;
     m_txButton->setEnabled(ready);
     if (m_txActive) {
         m_txButton->setText(QStringLiteral("Transmitting..."));
@@ -1376,10 +1434,9 @@ void Ax25HfPacketDecodeDialog::refreshTransmitControls()
 
     if (m_txText) {
         m_txText->setEnabled(!m_txActive && !m_txPendingStream);
-        m_txText->setToolTip(hfTx
-            ? QStringLiteral("Transmit a 300 baud HF AX.25 UI frame. Raw text uses %1>APRS; full SRC>DST,path:payload syntax is also accepted.")
-                .arg(defaultTransmitSource())
-            : QStringLiteral("TX is enabled for 300 baud HF in this pass."));
+        m_txText->setToolTip(
+            QStringLiteral("Transmit a %1 AX.25 UI frame. Raw text uses %2>APRS; full SRC>DST,path:payload syntax is also accepted.")
+                .arg(ax25ModemProfileName(m_shim->config().profile), defaultTransmitSource()));
     }
 }
 

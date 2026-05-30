@@ -1,6 +1,8 @@
 # AetherModem AX.25 Notes
 
-This file captures the current 300 baud HF AX.25 modem bring-up notes for the AetherSDR AetherModem window.
+This file captures the AX.25 modem bring-up notes for the AetherSDR AetherModem
+window. It covers the original 300 baud HF profile and the 1200 baud VHF (Bell
+202 / 2m APRS) profile added afterward.
 
 The working test packet has been:
 
@@ -75,6 +77,57 @@ The current build logs:
 
 The packet activity graph uses AX.25-like candidate deltas rather than raw HDLC candidate deltas, because raw HDLC counts are lane-summed and noisy.
 
+## VHF 1200 baud (Bell 202 / 2m APRS)
+
+The `Vhf1200` profile decodes standard 2m FM APRS (e.g. 144.390 MHz in North
+America), including via a transverter where the radio sits on an HF IF in FM.
+Select it with the **1200 baud VHF** profile button in the AetherModem window.
+
+```text
+sample rate:       24000 Hz
+baud:              1200
+mark:              1200 Hz
+space:             2200 Hz
+samples/symbol:    20
+polarity:          Normal for upright FM-demodulated AFSK
+lanes:             18 (10 free-running phase + 4 tracked phases x 2 PLL alphas)
+```
+
+Unlike HF, 1200 baud uses a **hybrid decode bank** (tuned by `kVhf1200*` in
+`src/core/tnc/AetherAx25LibmodemShim.cpp`) that favors aggressive capture:
+
+- **Free-running phase lanes** (PLL alpha 0, spread across the 20-sample symbol)
+  decode clean / short / strong bursts the instant they arrive — at least one
+  lane samples the eye center, the same proven mechanism as the HF bank. This is
+  what makes the synthetic and chunked 1200 loopback tests decode; a single
+  Gardner-only lane (the original stub) never locked reliably.
+- **Gardner-tracked lanes** (PLL alpha 0.010 and 0.025) chase the symbol clock
+  for TX/RX drift and fading on longer or weaker bursts.
+
+Duplicate suppression collapses the same frame seen by several lanes into one
+emission, so the 18-lane bank still reports each packet once.
+
+Polarity is **Normal** for upright FM-demodulated AFSK; use Reverse only as a
+tone-sense check if a mode/sideband change kills all decodes. Both receive and
+transmit are available on the 1200 profile (see the Experimental TX Path
+section) — the AetherModem text field keys an AX.25 UI frame at whichever baud
+profile is selected.
+
+### Iterating on 1200 baud
+
+- Enable the **AetherModem** (`aether.ax25`) log category. On every profile
+  switch the modem logs a one-line config summary
+  (`modem configured: 1200 baud VHF ... lanes=18`), and each decode logs
+  `decoded AX.25 frame baud=1200 conf=... SRC=... payload=...`.
+- Click the packet-activity graph to toggle the per-second diagnostics summary
+  (tones, gate, symbols, confidence, HDLC/AX.25 candidates, FCS reject classes)
+  — identical instrumentation to the HF path, now tagged with `baud=`.
+- Replay a saved capture against every profile/polarity in one pass:
+  `ax25_libmodem_shim_test --replay-capture <mono-float32.wav>`. Use the
+  window's **Capture 3m** button to record a real 2m session first.
+- If marginal bursts are missed, raise `kVhf1200FreeRunPhaseCount` for denser
+  fixed-phase coverage, or adjust `kVhf1200PllAlphas` for the tracked lanes.
+
 ## Radio and Level Learnings
 
 The successful captures were not close to clipping:
@@ -94,9 +147,13 @@ For current testing, keep receive audio in this rough range:
 
 ## Experimental TX Path
 
-The first TX pass is intentionally narrow:
+AX.25 UI-frame transmit works on **both** the 300 baud HF and 1200 baud VHF
+profiles. The transmit field keys whichever profile is currently selected, so
+the same text field that sends an HF packet on 14 MHz sends a 2m APRS packet
+(via a transverter) when 1200 baud VHF is active.
 
-- 300 baud HF AX.25 UI frames only.
+- AX.25 UI frames at the selected baud profile (HF 300 → 1600/1800 Hz;
+  VHF 1200 → 1200/2200 Hz Bell 202).
 - The transmit field accepts raw payload text or full `SRC>DST,path:payload`
   monitor syntax.
 - Raw text defaults to `<radio callsign> > APRS` with no digipeater path.
@@ -105,11 +162,16 @@ The first TX pass is intentionally narrow:
 - The window sets DAX TX routing, keys PTT with a short settle/lead time,
   feeds the generated audio in 20 ms chunks, then unkeys and restores the
   previous DAX state.
+- **TXDELAY (preamble) is profile-aware.** HF 300 keeps its long preamble
+  (`kTxPreambleFlags`, ~2.1 s); VHF 1200 uses a shorter one
+  (`kVhf1200TxPreambleFlags` = 64 flags, ~0.43 s) since each flag is 4x quicker
+  at 1200 baud. Raise the VHF value if a transverter's T/R switching clips the
+  start of the burst.
 
 TX diagnostics in the `aether.ax25` category include packet source/destination,
 path, payload bytes, AX.25 frame bytes, bit count, waveform duration, RMS/peak,
-DAX TX stream id, PTT lead/tail timing, and paced chunk progress when debug is
-enabled.
+baud, mark/space, polarity, preamble/postamble flag counts, DAX TX stream id,
+PTT lead/tail timing, and paced chunk progress when debug is enabled.
 
 ## Open Work
 

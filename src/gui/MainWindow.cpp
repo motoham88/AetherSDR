@@ -3322,6 +3322,16 @@ MainWindow::MainWindow(QWidget* parent)
         settings.save();
         if (m_flexControlDialog)
             m_flexControlDialog->setStepSize(step);
+        // Invalidate persistent encoder accumulators so the next tick rebases
+        // and re-snaps to the new step grid. Without this, an in-flight target
+        // computed against the previous step size carries an off-grid residual
+        // (e.g. step 20 Hz → 500 Hz leaves a 60 Hz tail; #3260).
+        m_flexTargetMhz = -1.0;
+        m_flexCoalesceTimer.stop();
+#ifdef HAVE_MIDI
+        m_midiTuneTargetMhz = -1.0;
+        m_midiTuneIdleTimer.stop();
+#endif
     });
     int savedStep = AppSettings::instance().value("TuningStepSize", "100").toInt();
     for (auto* a : m_panStack->allApplets()) a->spectrumWidget()->setStepSize(savedStep);
@@ -4157,9 +4167,16 @@ MainWindow::MainWindow(QWidget* parent)
         qDebug() << "Ulanzi Dial:" << (connected ? "connected" : "disconnected") << name;
     });
 
-    // Kick off scanning on the external-controller thread.
-    QMetaObject::invokeMethod(m_dialBackend, &UlanziDialBackend::start,
-                              Qt::QueuedConnection);
+    // Kick off scanning on the external-controller thread — only if the
+    // user has opted in. On macOS, the backend's IOHIDManagerOpen(...,
+    // kIOHIDOptionsTypeSeizeDevice) trips the OS Input Monitoring TCC
+    // prompt the moment it is called, regardless of whether a Ulanzi Dial
+    // is actually present. Defaulting this off so the vast majority of
+    // users — who do not own the peripheral — never see the prompt (#3257).
+    if (AppSettings::instance().value("UlanziDialEnabled", "False").toString() == "True") {
+        QMetaObject::invokeMethod(m_dialBackend, &UlanziDialBackend::start,
+                                  Qt::QueuedConnection);
+    }
 
     // Start the external controller thread — objects are already moved
     m_extCtrlThread->start();
@@ -4192,9 +4209,33 @@ MainWindow::MainWindow(QWidget* parent)
 #endif
 
 #ifdef HAVE_HIDAPI
-    QMetaObject::invokeMethod(m_hidEncoder, [this] {
-        m_hidEncoder->loadSettings();
-    });
+    // One-time migration: existing users had HidEncoderAutoDetect=True
+    // with the old always-on loadSettings() pattern, and a working
+    // RC-28 / PowerMate / Shuttle / StreamDeck+.  Honour that prior
+    // intent on first launch after this upgrade so their controller
+    // doesn't silently stop working until they discover the new
+    // checkbox.  Only flips the new key once; subsequent toggles in
+    // Radio Setup → Serial own it from then on.
+    {
+        auto& s = AppSettings::instance();
+        if (!s.contains("HidEncoderEnabled")) {
+            const bool hadAutodetect =
+                s.value("HidEncoderAutoDetect", "False").toString() == "True";
+            s.setValue("HidEncoderEnabled", hadAutodetect ? "True" : "False");
+        }
+    }
+    // Same TCC concern as the Ulanzi gate above (#3257). HidEncoderManager::
+    // loadSettings() iterates the supported VID/PID list calling hid_open()
+    // for autodetect; HIDAPI's macOS backend opens with
+    // kIOHIDOptionsTypeSeizeDevice internally, so on every launch this
+    // would prompt for Input Monitoring even on machines without any
+    // supported encoder hardware. Default off; user enables in
+    // Preferences → Serial when they connect a StreamDeck+ / RC-28 / etc.
+    if (AppSettings::instance().value("HidEncoderEnabled", "False").toString() == "True") {
+        QMetaObject::invokeMethod(m_hidEncoder, [this] {
+            m_hidEncoder->loadSettings();
+        });
+    }
 #endif
 
     // ── P/CW applet: mic meters + ALC meter + model ────────────────────────
@@ -5246,10 +5287,6 @@ MainWindow::~MainWindow()
                                       Qt::BlockingQueuedConnection);
         }
 #endif
-        if (m_dialBackend) {
-            QMetaObject::invokeMethod(m_dialBackend, &UlanziDialBackend::stop,
-                                      Qt::BlockingQueuedConnection);
-        }
 #ifdef HAVE_SERIALPORT
         if (m_serialPort) {
             m_serialPort->deleteLater();
@@ -5263,13 +5300,23 @@ MainWindow::~MainWindow()
             m_midiControl->deleteLater();
         }
 #endif
-#ifdef HAVE_HIDAPI
-        if (m_hidEncoder) {
-            m_hidEncoder->deleteLater();
-        }
-#endif
         m_extCtrlThread->quit();
         m_extCtrlThread->wait(3000);
+        // Delete ExtControllers objects synchronously after the thread stops.
+        // deleteLater() races with quit() and can leave destructors unrun.
+        // On macOS, UlanziDialMacOSManager::stop() calls
+        // IOHIDManagerUnscheduleFromRunLoop(...GetMain()) which must run on the
+        // main thread — calling it via BlockingQueuedConnection deadlocks because
+        // the main thread is blocked waiting for the cross-thread call to return.
+        // Safe to call directly here: the ExtControllers thread has stopped so
+        // there is no race on m_dialBackend's state.
+        if (m_dialBackend) m_dialBackend->stop();
+        delete m_dialBackend;
+        m_dialBackend = nullptr;
+#ifdef HAVE_HIDAPI
+        delete m_hidEncoder;
+        m_hidEncoder = nullptr;
+#endif
     } else {
 #ifdef HAVE_SERIALPORT
         delete m_serialPort;
@@ -5646,7 +5693,7 @@ void MainWindow::publishCwDecodeMqtt(const QString& text, float cost, bool rx)
     obj[QStringLiteral("rx")]   = rx;
     if (auto* s = activeSlice(); s && s->frequency() > 0.0)
         obj[QStringLiteral("freq")] = s->frequency();
-    m_mqttClient->publish(QStringLiteral("aethersdr/cw/decode"),
+    m_mqttClient->publish(QString::fromLatin1(kCwDecodeTopic),
                           QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
 #endif
@@ -5656,8 +5703,12 @@ void MainWindow::wireRadioSetupDialogSignals(RadioSetupDialog* dlg, const QStrin
     if (!dlg) return;
     connect(dlg, &RadioSetupDialog::txBandSettingsRequested,
             m_txBandAction, &QAction::trigger);
-#ifdef HAVE_SERIALPORT
+    // serialSettingsChanged is the "external-device settings changed" signal in
+    // practice — the dialog emits it for serial-port, FlexControl, Ulanzi-dial,
+    // and HID-encoder edits. The Ulanzi/HID branches below run regardless of
+    // HAVE_SERIALPORT because those backends exist on all platforms (#3257).
     connect(dlg, &RadioSetupDialog::serialSettingsChanged, this, [this]() {
+#ifdef HAVE_SERIALPORT
         QMetaObject::invokeMethod(m_serialPort, [this] { m_serialPort->loadSettings(); });
         auto& fcs = AppSettings::instance();
         const bool fcOpen = fcs.value("FlexControlOpen", "False").toString() == "True";
@@ -5681,10 +5732,29 @@ void MainWindow::wireRadioSetupDialogSignals(RadioSetupDialog* dlg, const QStrin
         if (m_flexControlDialog)
             m_flexControlDialog->refreshButtonActions();
         syncFlexControlIndicatorForSettings();
+#endif
+        // External-device enable evaluation. start()/loadSettings() are
+        // idempotent (each guards against re-open), so re-firing them when
+        // unrelated settings change is harmless. Toggling the user-facing
+        // checkbox from off → on is the moment the OS TCC prompt fires —
+        // with user context — instead of every launch (#3257).
+        auto& s = AppSettings::instance();
+        if (m_dialBackend &&
+            s.value("UlanziDialEnabled", "False").toString() == "True") {
+            QMetaObject::invokeMethod(m_dialBackend, &UlanziDialBackend::start,
+                                      Qt::QueuedConnection);
+        }
 #ifdef HAVE_HIDAPI
+        if (m_hidEncoder &&
+            s.value("HidEncoderEnabled", "False").toString() == "True") {
+            QMetaObject::invokeMethod(m_hidEncoder, [this] {
+                m_hidEncoder->loadSettings();
+            });
+        }
         refreshStreamDeckLabels();
 #endif
     });
+#ifdef HAVE_SERIALPORT
     dlg->setFlexControlConnectionStatus(
         m_flexControlConnected,
         m_flexControlConnected && m_flexControl ? m_flexControl->portName() : QString());
@@ -6901,8 +6971,18 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
                               : (s->stepHz() > 0 ? s->stepHz() : 100);
         if (m_flexTargetMhz < 0.0 ||
             (!m_flexCoalesceTimer.isActive() &&
-             std::abs(m_flexTargetMhz - s->frequency()) > 0.001))
-            m_flexTargetMhz = s->frequency();
+             std::abs(m_flexTargetMhz - s->frequency()) > 0.001)) {
+            // Snap the base to the active step grid so encoder ticks land on
+            // clean multiples even when the slice frequency is off-grid
+            // (e.g. after a step-size change or a typed entry). Mirrors the
+            // MIDI tune-knob path at the top of this file (#3260).
+            const long long curHz =
+                static_cast<long long>(std::round(s->frequency() * 1e6));
+            const long long snapped = stepHz > 0
+                ? ((curHz + stepHz / 2) / stepHz) * stepHz
+                : curHz;
+            m_flexTargetMhz = snapped / 1e6;
+        }
         m_flexTargetMhz += steps * stepHz / 1e6;
         if (sw) sw->setVfoFrequency(m_flexTargetMhz);
         if (!m_flexCoalesceTimer.isActive())
@@ -11444,6 +11524,21 @@ void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,
             m_updatingFromModel = false;
         }
         return;
+    }
+
+    // Absolute-target intents (typed VFO entry, spectrum click, spot recall,
+    // bandstack recall) must invalidate any in-flight encoder accumulator.
+    // The #1524 1 kHz jitter-suppression tolerance otherwise keeps a stale
+    // m_flexTargetMhz when the typed frequency lands inside that window,
+    // producing the +60 Hz residual reported in #3260.
+    if (intent == TuneIntent::CommandedTargetCenter
+        || intent == TuneIntent::AbsoluteJump) {
+        m_flexTargetMhz = -1.0;
+        m_flexCoalesceTimer.stop();
+#ifdef HAVE_MIDI
+        m_midiTuneTargetMhz = -1.0;
+        m_midiTuneIdleTimer.stop();
+#endif
     }
 
     if (slice->sliceId() == m_activeSliceId && sw)

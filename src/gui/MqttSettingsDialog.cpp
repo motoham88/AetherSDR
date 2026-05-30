@@ -2,6 +2,7 @@
 
 #include "core/AppSettings.h"
 #include "core/LogManager.h"
+#include "core/MqttSettings.h"
 #include "core/ThemeManager.h"
 
 #include <QCheckBox>
@@ -196,6 +197,16 @@ void MqttSettingsDialog::buildUi()
     buttonControls->addWidget(removeButton);
     buttonControls->addStretch();
     buttonsLayout->addLayout(buttonControls);
+
+    auto* pubInternalGroup = new QGroupBox(tr("Internal AetherSDR Topics"));
+    auto* pubInternalLayout = new QVBoxLayout(pubInternalGroup);
+    auto* pubInternalText = new QLabel(
+        tr("Published automatically whenever MQTT is connected; these topics are not user-configurable:\n"
+           "%1").arg(internalMqttPublishTopics().join(QStringLiteral("\n"))));
+    pubInternalText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    pubInternalLayout->addWidget(pubInternalText);
+    buttonsLayout->addWidget(pubInternalGroup);
+
     tabs->addTab(buttonsTab, tr("Publish Buttons"));
 
     connect(m_addButtonRowBtn, &QPushButton::clicked, this, [this] { addButtonRow(); });
