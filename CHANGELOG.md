@@ -8,6 +8,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Connect to any radio behind a TCI server (family `tci`).** Every TCI
+  path in AetherSDR so far ran the server direction — AetherSDR
+  impersonating a radio for a logging program. This adds the inverse: a
+  backend that dials a TCI server and treats what is behind it as the
+  radio. It puts hardware in reach that AetherSDR has no wire protocol
+  for, including an Elecraft K3/K3S fronted by the `k3-tci-bridge`
+  project, and anything else speaking TCI (ExpertSDR3, SunSDR) comes
+  along for free. Pick **TCI server** in Connect by IP; the address field
+  accepts an optional `host:port`, since TCI is the one family whose port
+  genuinely varies between servers (50001 for the K3 bridge, 40001 for
+  ExpertSDR3). Verified against a live K3: frequency, mode, filter,
+  S-meter and RX audio, with tuning from AetherSDR moving the radio.
+  Spectrum is deliberately absent — a K3 has no panadapter output to
+  bridge, so the panadapter surface is omitted rather than left empty.
+  Experimental, and the app says so on first connect.
+
 ## [v26.8.4] — 2026-08-22
 
 ### Evidence-backed Icom · client-timed HL2 CW · faster PSK Reporter maps · steadier audio, MIDI and TCI

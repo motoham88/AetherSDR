@@ -20,7 +20,10 @@ context that would otherwise live in tribal knowledge.
   panadapter, waterfall, audio, and meter streams.
 - [`tci-discovery.md`](tci-discovery.md),
   [`tci-receivers.md`](tci-receivers.md) — ExpertSDR3 TCI v2.0
-  integration notes.
+  integration notes (AetherSDR as the TCI *server*).
+- [`tci-client-backend.md`](tci-client-backend.md) — the inverse: family
+  `tci`, AetherSDR as a TCI *client* dialing a server that fronts other
+  hardware (Elecraft K3 via k3-tci-bridge, ExpertSDR3, SunSDR).
 - [`multi-pan-pitfalls.md`](multi-pan-pitfalls.md) — 20 numbered
   lessons learned from the multi-panadapter rollout.
 - [`recenter-policy.md`](recenter-policy.md) — when AetherSDR re-centers
