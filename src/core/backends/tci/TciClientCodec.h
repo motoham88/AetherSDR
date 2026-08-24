@@ -108,6 +108,7 @@ public:
     [[nodiscard]] static QString ritEnableSet(int trx, bool on);
     [[nodiscard]] static QString ritOffsetSet(int trx, int hz);
     [[nodiscard]] static QString xitEnableSet(int trx, bool on);
+    [[nodiscard]] static QString xitOffsetSet(int trx, int hz);
     [[nodiscard]] static QString driveSet(int trx, int percent);
     [[nodiscard]] static QString volumeSet(int db);
     [[nodiscard]] static QString muteSet(bool on);

@@ -311,6 +311,7 @@ void TciBackend::handleEvent(const TciEvent& event)
         const qint64 hz = event.argLongLong(2, 0);
         if (hz <= 0 || hz == m_vfoHz) return;
         m_vfoHz = hz;
+        if (!m_connected) return;   // cached; published by publishInitialSlice
 
         SliceDelta d;
         d.frequency = static_cast<double>(hz) / 1.0e6;   // MHz, per SliceDelta
@@ -329,6 +330,7 @@ void TciBackend::handleEvent(const TciEvent& event)
         }
         if (mode == m_mode) return;
         m_mode = mode;
+        if (!m_connected) return;   // cached; published by publishInitialSlice
 
         SliceDelta d;
         d.mode = mode;
@@ -344,6 +346,7 @@ void TciBackend::handleEvent(const TciEvent& event)
         if (low == m_filterLowHz && high == m_filterHighHz) return;
         m_filterLowHz = low;
         m_filterHighHz = high;
+        if (!m_connected) return;   // cached; published by publishInitialSlice
 
         SliceDelta d;
         d.filterLow = low;
@@ -383,12 +386,31 @@ void TciBackend::handleEvent(const TciEvent& event)
     }
 
     if (verb == QLatin1String("rit_enable") || verb == QLatin1String("xit_enable")
-        || verb == QLatin1String("rit_offset")) {
+        || verb == QLatin1String("rit_offset") || verb == QLatin1String("xit_offset")) {
         if (event.argInt(0, -1) != m_trx) return;
         SliceDelta d;
-        if (verb == QLatin1String("rit_enable"))  d.ritOn = event.argBool(1, false);
-        if (verb == QLatin1String("xit_enable"))  d.xitOn = event.argBool(1, false);
-        if (verb == QLatin1String("rit_offset"))  d.ritFreq = event.argInt(1, 0);
+        if (verb == QLatin1String("rit_enable")) {
+            m_ritOn = event.argBool(1, false);
+            d.ritOn = m_ritOn;
+        }
+        if (verb == QLatin1String("xit_enable")) {
+            m_xitOn = event.argBool(1, false);
+            d.xitOn = m_xitOn;
+        }
+        // ONE cached offset for both, because the K3 has one RO register and
+        // the server echoes the same value on both verbs.
+        if (verb == QLatin1String("rit_offset")) {
+            m_ritOffsetHz = event.argInt(1, 0);
+            d.ritFreq = m_ritOffsetHz;
+        }
+        // `xit_offset` was previously unhandled, so a server that reports the
+        // transmit offset separately left the XIT readout pinned at 0 while
+        // the radio was shifted.
+        if (verb == QLatin1String("xit_offset")) {
+            m_ritOffsetHz = event.argInt(1, 0);
+            d.xitFreq = m_ritOffsetHz;
+        }
+        if (!m_connected) return;   // cached; published by publishInitialSlice
         emit sliceChanged(sliceId(), d);
         return;
     }
@@ -436,8 +458,19 @@ void TciBackend::publishInitialSlice()
     s.inUse  = true;
     s.active = true;
 
-    // SEEDED FROM THE INIT BURST, which is the whole reason those values are
-    // cached as they stream past. The burst reports vfo/modulation/
+    // SEEDED FROM THE INIT BURST, and the ONLY place any of it is published.
+    //
+    // NOTHING may emit a slice delta before connected(): RadioModel
+    // materialises a SliceModel on the first delta it sees, and then stages
+    // and clears the models when connected() arrives. A delta emitted early
+    // therefore builds a slice the GUI binds to and the session then discards
+    // — leaving the applet showing a frozen snapshot of the init burst while
+    // every later delta lands on a different instance. Measured: the model
+    // read 7.0255 MHz with RIT at 1234 Hz while the RX applet showed 7.032180
+    // and +750 Hz, and no amount of tuning moved it.
+    //
+    // So the per-field handlers cache and return while !m_connected, and this
+    // publishes the whole accumulated state once, after connected(). The burst reports vfo/modulation/
     // rx_filter_band BEFORE the `ready;` that lets this slice exist, so the
     // per-field handlers emitted them into a slice that was not there yet and
     // every one was dropped. Measured against a live K3 sitting on 14.028970
@@ -449,6 +482,10 @@ void TciBackend::publishInitialSlice()
         s.filterLow  = m_filterLowHz;
         s.filterHigh = m_filterHighHz;
     }
+    s.ritOn   = m_ritOn;
+    s.xitOn   = m_xitOn;
+    s.ritFreq = m_ritOffsetHz;
+    s.xitFreq = m_ritOffsetHz;
     // One receiver IS the transmitter here. Leaving this unset makes
     // RadioModel's interlock refuse every key attempt with "No transmit slice
     // is assigned" before the backend is ever asked — a refusal that is
@@ -601,6 +638,25 @@ void TciBackend::setKeying(bool key)
     // would not undo.
     if (!m_caps.canTransmit) return;
     sendCommand(TciClientCodec::trxSet(m_trx, key));
+}
+
+void TciBackend::setRitEnabled(bool on)
+{
+    sendCommand(TciClientCodec::ritEnableSet(m_trx, on));
+}
+
+void TciBackend::setXitEnabled(bool on)
+{
+    sendCommand(TciClientCodec::xitEnableSet(m_trx, on));
+}
+
+void TciBackend::setRitOffset(int hz)
+{
+    // Fire-and-forget with no optimistic local update, like every other verb
+    // here: the server answers with the offset the radio ACCEPTED, which is
+    // not always the one asked for. On a K3 the register is shared with XIT
+    // and clamped to +/-9999, so the echo is the only honest source.
+    sendCommand(TciClientCodec::ritOffsetSet(m_trx, hz));
 }
 
 void TciBackend::invokeExtension(const QString& ns, const QString& verb,

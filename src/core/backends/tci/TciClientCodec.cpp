@@ -182,12 +182,20 @@ QString TciClientCodec::ritEnableSet(int trx, bool on)
 
 QString TciClientCodec::ritOffsetSet(int trx, int hz)
 {
-    return QStringLiteral("rit_offset:%1,%2;").arg(trx).arg(hz);
+    return QStringLiteral("rit_offset:%1,%2;").arg(trx).arg(qBound(-9999, hz, 9999));
 }
 
 QString TciClientCodec::xitEnableSet(int trx, bool on)
 {
     return QStringLiteral("xit_enable:%1,%2;").arg(trx).arg(boolToken(on));
+}
+
+QString TciClientCodec::xitOffsetSet(int trx, int hz)
+{
+    // Clamped to the range TCI advertises in `if_limits` and the K3's RO
+    // register accepts. Sending more just makes the radio clamp it and echo
+    // back a value the operator did not ask for.
+    return QStringLiteral("xit_offset:%1,%2;").arg(trx).arg(qBound(-9999, hz, 9999));
 }
 
 QString TciClientCodec::driveSet(int trx, int percent)

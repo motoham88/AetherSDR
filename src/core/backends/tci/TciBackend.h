@@ -74,6 +74,16 @@ public:
     void setSliceAgc(int sliceId, const QString& mode, int thresholdDb) override;
     void setPanCenter(const QString& panId, double hz, PanCenterIntent intent) override;
     void setKeying(bool key) override;
+
+    // RIT / XIT. The seam splits the transmit offset from the receive one for
+    // radios that have two registers; a K3 has ONE (`RO`, shared), so
+    // setXitOffset is deliberately NOT overridden — its base implementation
+    // forwards to setRitOffset, which is exactly the truth here. Overriding it
+    // to send `xit_offset:` would imply an independence the radio does not
+    // have, and the server would write the same register anyway.
+    void setRitEnabled(bool on) override;
+    void setXitEnabled(bool on) override;
+    void setRitOffset(int hz) override;
     void invokeExtension(const QString& ns, const QString& verb,
                          quint64 requestId, const QVariant& arg = {}) override;
 
@@ -117,6 +127,11 @@ private:
     int     m_filterLowHz = 0;
     int     m_filterHighHz = 0;
     bool    m_transmitting = false;
+    // RIT/XIT, cached for the same reason as the fields above: they arrive in
+    // the init burst, before the slice exists.
+    bool    m_ritOn = false;
+    bool    m_xitOn = false;
+    int     m_ritOffsetHz = 0;
 
     // Audio: the wire rate the server advertised, and the converter that takes
     // it to the engine's native 24 kHz stereo float. Built on the FIRST audio
