@@ -7109,6 +7109,26 @@ void MainWindow::applyCapabilitiesToUi(bool connected, const RadioCapabilities& 
     m_radioManufacturer = connected ? caps.manufacturer : QString();
     refreshRadioIdentityLabels();
 
+    // ── The connect splash, for a radio that has no spectrum to wait for ──
+    //
+    // "Connecting to radio…" is cleared by the arrival of the FIRST spectrum
+    // frame (finishPanadapterConnectionAnimation, driven from the FFT stream).
+    // A radio that declares no panadapter never sends one, so the splash sat
+    // over a fully working session forever: frequency, mode, filter, S-meter
+    // and audio all live behind a pane still claiming to be connecting.
+    //
+    // Read off caps DIRECTLY rather than RadioModel::maxPanadapters(), which
+    // is deliberately NOT the same question — it falls back to the FlexLib
+    // platform table when a backend reports 0, so it never answers zero and a
+    // test against it would silently never fire.
+    //
+    // The capability, not a family name: a TCI-fronted K3 has no panadapter
+    // output to bridge, and an Icom with no scope module reports 0 the same
+    // way (IcomCivBackend: `hasScope ? receivers : 0`).
+    if (connected && caps.maxPanadapters <= 0) {
+        setPanadapterConnectionAnimation(false);
+    }
+
     // ── Mic sources: MIC / BAL / LINE / ACC are Flex connectors ────────────
     // A radio that cannot have its input chosen by a client collapses to PC.
     if (m_appletPanel) {
