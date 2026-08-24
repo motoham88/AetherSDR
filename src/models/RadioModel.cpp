@@ -1197,7 +1197,43 @@ void RadioModel::setupBackend(const QString& family)
             // non-Flex backend, so nothing would create the model and every delta
             // would be dropped (slice panel stuck at 0.000000). Materialise it on
             // the first delta and route mode intents back through the seam.
-            s = new SliceModel(sliceId, this);
+            //
+            // RECLAIM FIRST, exactly as the Flex create path does (see the
+            // m_staleSlices lookup there). This path minted a NEW SliceModel
+            // unconditionally, and the consequence was a GUI bound to an
+            // object the session had already discarded: connect() stages the
+            // previous session's slices, the seam then built a fresh one, and
+            // every applet holding the staged pointer went on displaying its
+            // last values forever. Reported as "the RX Controls panel doesn't
+            // track the radio frequency like the slice flag does" — the flag
+            // follows the live model, the panel followed the dead one.
+            //
+            // Not TCI-specific: every seam backend (HL2, Icom) reaches this,
+            // and a clean launch reaches it too, because the startup slice is
+            // staged the same way a previous session's would be.
+            //
+            // Cross-radio safety is already settled upstream: the serial guard
+            // in the connect path drops staged models when the target radio
+            // differs, so anything still in m_staleSlices here belongs to the
+            // radio we are now talking to.
+            if (auto it = m_staleSlices.find(sliceId);
+                it != m_staleSlices.end() && it.value()) {
+                s = it.value();
+                m_staleSlices.erase(it);
+                // Drop the PREVIOUS session's engine wiring before re-adding
+                // it below, or every intent would be delivered twice — once
+                // per reclaim. Narrow on purpose: this severs sender=slice →
+                // receiver=RadioModel only. Every connect in this block and in
+                // wireSliceAudioIntentsToBackend passes `this`, so they all go;
+                // the applet's and MainWindow's connections have other
+                // receivers and SURVIVE, which is the entire point of
+                // reclaiming rather than rebuilding.
+                disconnect(s, nullptr, this, nullptr);
+                qCDebug(lcProtocol) << "RadioModel: reclaimed seam slice" << sliceId
+                                    << "from previous session";
+            } else {
+                s = new SliceModel(sliceId, this);
+            }
             connect(s, &SliceModel::modeChangeRequested, this,
                     [this, s](const QString& mode) {
                 if (m_backend) m_backend->setSliceMode(s->sliceId(), mode);
