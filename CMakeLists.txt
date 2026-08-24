@@ -632,6 +632,13 @@ set(CORE_SOURCES
     src/core/backends/icom/IcomCivBackend.cpp # IcomCIV (IRadioBackend impl)
     src/core/backends/icom/IcomSettings.cpp  # owned config, "Icom" root key (Principle V)
     src/core/backends/icom/IcomCredentials.cpp # password -> keychain, NEVER settings
+    # TCI client backend — AetherSDR as a TCI *client* (family "tci"), the
+    # inverse of src/core/TciServer.cpp. Listed unconditionally and guarded
+    # inside the TU, matching how TciServer/TciProtocol are handled: the codec
+    # has no WebSocket dependency at all, so its unit tests still build and run
+    # on a configuration where Qt6::WebSockets was not found.
+    src/core/backends/tci/TciClientCodec.cpp # TCI client-direction parse/format (no I/O)
+    src/core/backends/tci/TciBackend.cpp     # IRadioBackend impl over QWebSocket
     src/core/dsp/WdspChannel.cpp
     ${AETHER_SETTINGS_SOURCES}
     src/core/RadioStateMemory.cpp   # RFC #4603 client-side radio memory

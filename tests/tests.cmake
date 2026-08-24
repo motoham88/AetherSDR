@@ -2840,6 +2840,16 @@ target_link_libraries(aetherd_pan_decode_test PRIVATE aethercore Qt6::Core Qt6::
 set_target_properties(aetherd_pan_decode_test PROPERTIES AUTOMOC ON)
 add_test(NAME aetherd_pan_decode_test COMMAND aetherd_pan_decode_test)
 
+# TCI CLIENT-direction codec (family "tci"). DELIBERATELY OUTSIDE the
+# Qt6WebSockets_FOUND guard below: TciClientCodec is pure string/byte work with
+# no socket dependency, so its tests must still build and run on a
+# configuration where Qt6::WebSockets was not found — which is exactly the
+# configuration where a mistake in it would otherwise go unnoticed.
+add_executable(tci_client_codec_test tests/tci_client_codec_test.cpp)
+target_include_directories(tci_client_codec_test PRIVATE src)
+target_link_libraries(tci_client_codec_test PRIVATE aethercore Qt6::Core)
+add_test(NAME tci_client_codec_test COMMAND tci_client_codec_test)
+
 if(Qt6WebSockets_FOUND)
     add_executable(tci_protocol_test tests/tci_protocol_test.cpp)
     target_include_directories(tci_protocol_test PRIVATE src)

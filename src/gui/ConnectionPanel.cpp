@@ -174,13 +174,10 @@ void saveRoutedProfiles(const QJsonObject& profiles)
 // they were when they were written.
 QString familyFromProfile(const QJsonObject& profile)
 {
-    const QString family =
-        profile.value("identity").toObject().value("family").toString().trimmed().toLower();
-    if (family == QLatin1String(ConnectionPanel::kFamilyHl2))
-        return QString::fromLatin1(ConnectionPanel::kFamilyHl2);
-    if (family == QLatin1String(ConnectionPanel::kFamilyIcom))
-        return QString::fromLatin1(ConnectionPanel::kFamilyIcom);
-    return QString::fromLatin1(ConnectionPanel::kFamilyFlex);
+    // Unrecognised (including absent) reads as flex, which is what a profile
+    // written before the selector existed actually was.
+    return ConnectionPanel::normalizeFamily(
+        profile.value("identity").toObject().value("family").toString());
 }
 
 RadioBindSettings bindSettingsFromProfile(const QJsonObject& profile)
@@ -700,6 +697,8 @@ ConnectionPanel::ConnectionPanel(QWidget* parent)
     m_manualRadioTypeCombo->addItem(tr("FlexRadio"), QString::fromLatin1(kFamilyFlex));
     m_manualRadioTypeCombo->addItem(tr("Hermes-Lite 2"), QString::fromLatin1(kFamilyHl2));
     m_manualRadioTypeCombo->addItem(tr("Icom (network)"), QString::fromLatin1(kFamilyIcom));
+    m_manualRadioTypeCombo->addItem(tr("TCI server (Elecraft K3 bridge, ExpertSDR3)"),
+                                    QString::fromLatin1(kFamilyTci));
     addManualRow(QStringLiteral("Radio type:"), m_manualRadioTypeCombo);
 
     m_manualIpCombo = new QComboBox(manualGroup);
@@ -1406,14 +1405,14 @@ bool ConnectionPanel::automationConnectByIp(const QString& hostOrIp,
     }
 
     const QString wantedFamily = family.trimmed().toLower();
-    if (!wantedFamily.isEmpty()
-        && wantedFamily != QLatin1String(kFamilyFlex)
-        && wantedFamily != QLatin1String(kFamilyHl2)
-        && wantedFamily != QLatin1String(kFamilyIcom)) {
+    // REJECTS rather than normalizing. An automation caller that names a
+    // family we do not have must hear so; silently falling back to flex would
+    // connect it to the wrong radio and report success.
+    if (!wantedFamily.isEmpty() && !knownFamilies().contains(wantedFamily)) {
         setAutomationError(
             error,
-            QStringLiteral("unknown radio family '%1' (use flex, hl2 or icom)")
-                .arg(family.trimmed()));
+            QStringLiteral("unknown radio family '%1' (use %2)")
+                .arg(family.trimmed(), knownFamilies().join(QStringLiteral(", "))));
         return false;
     }
 
@@ -2087,6 +2086,22 @@ RadioBindSettings ConnectionPanel::currentManualBindSettings(bool* staleSelectio
     return settings;
 }
 
+QStringList ConnectionPanel::knownFamilies()
+{
+    // Order is the order the manual selector offers them.
+    return {QString::fromLatin1(kFamilyFlex),
+            QString::fromLatin1(kFamilyHl2),
+            QString::fromLatin1(kFamilyIcom),
+            QString::fromLatin1(kFamilyTci)};
+}
+
+QString ConnectionPanel::normalizeFamily(const QString& family)
+{
+    const QString lowered = family.trimmed().toLower();
+    return knownFamilies().contains(lowered) ? lowered
+                                             : QString::fromLatin1(kFamilyFlex);
+}
+
 QString ConnectionPanel::currentManualFamily() const
 {
     const QString family = m_manualRadioTypeCombo
@@ -2100,12 +2115,7 @@ void ConnectionPanel::setManualFamily(const QString& family)
     if (!m_manualRadioTypeCombo)
         return;
 
-    const QString lowered = family.trimmed().toLower();
-    const QString wanted =
-        lowered == QLatin1String(kFamilyHl2)  ? QString::fromLatin1(kFamilyHl2)
-      : lowered == QLatin1String(kFamilyIcom) ? QString::fromLatin1(kFamilyIcom)
-                                              : QString::fromLatin1(kFamilyFlex);
-    const int index = m_manualRadioTypeCombo->findData(wanted);
+    const int index = m_manualRadioTypeCombo->findData(normalizeFamily(family));
     if (index < 0 || index == m_manualRadioTypeCombo->currentIndex()) {
         updateManualFamilyHints();
         return;
@@ -2623,6 +2633,74 @@ void ConnectionPanel::probeRadio(const QString& ip, bool restoreSavedFamily)
         info.isRouted           = true;
         info.bindSettings       = bindSettings;
         info.sessionBindAddress = m_pendingIcomSessionBindAddress;
+        rememberManualIp(trimmedIp);
+        resetManualConnectButton();
+        emit connectRequested(info);
+        return;
+    }
+
+    if (currentManualFamily() == QLatin1String(kFamilyTci)) {
+        // NO ANONYMOUS PROBE, for the Icom reason: a TCI session either
+        // completes the WebSocket upgrade and receives an init burst or it
+        // does not, and there is no cheaper question to ask first. So the
+        // connect IS the probe, and a wrong address surfaces as a session
+        // failure rather than as a separate "nothing there" step.
+        //
+        // THE PORT IS PART OF THE ADDRESS for this family alone. Every other
+        // family has one well-known port; TCI does not — the k3-tci-bridge
+        // listens on 50001 and ExpertSDR3 on 40001 — so an operator who
+        // cannot name the port cannot reach half the servers that exist.
+        QString hostPart = trimmedIp;
+        quint16 tciPort  = kDefaultTciPort;
+        // Split on a colon ONLY when there is exactly one, which is what
+        // distinguishes `host:port` from a bare IPv6 literal. A bracketed
+        // IPv6 address keeps its brackets and is handed on unsplit.
+        if (hostPart.count(QLatin1Char(':')) == 1) {
+            const int colon = hostPart.lastIndexOf(QLatin1Char(':'));
+            bool portOk = false;
+            const uint parsed = QStringView{hostPart}.mid(colon + 1).toUInt(&portOk);
+            if (portOk && parsed > 0 && parsed <= 65535) {
+                tciPort  = static_cast<quint16>(parsed);
+                hostPart = hostPart.left(colon);
+            }
+            // A malformed suffix falls through with the address untouched, so
+            // the resolve below reports it rather than us guessing at intent.
+        }
+
+        QHostAddress resolved;
+        if (!resolved.setAddress(hostPart)) {
+            const QHostInfo hostInfo = QHostInfo::fromName(hostPart);
+            if (hostInfo.error() != QHostInfo::NoError || hostInfo.addresses().isEmpty()) {
+                resetManualConnectButton();
+                setManualMessage(
+                    QStringLiteral("Could not resolve %1. Check the name, or enter the "
+                                   "server's IP address instead.").arg(hostPart),
+                    true);
+                return;
+            }
+            resolved = hostInfo.addresses().first();
+        }
+
+        RadioInfo info;
+        info.family  = QString::fromLatin1(kFamilyTci);
+        info.address = resolved;
+        info.port    = tciPort;
+        // Provisional. The server states its own `device:` in the init burst
+        // and the backend republishes capabilities from it, so this is only
+        // what the picker shows for the moment before that arrives.
+        info.model    = QStringLiteral("TCI server");
+        info.name     = info.model;
+        // TCI has no discovery, no MAC and no serial, so the endpoint is the
+        // only stable identity this radio has for us — and it has to be
+        // SOMETHING, because the restore/persist scope keys off it. The port
+        // is part of it: two servers on one host are two different radios.
+        info.serial   = QStringLiteral("tci:%1:%2").arg(resolved.toString()).arg(tciPort);
+        info.nickname = info.model;
+        // Same retention path as routed Flex, HL2 and Icom sessions. Without
+        // this marker MainWindow drops LastRoutedRadioIp immediately and the
+        // reconnect-at-startup checkbox has no host to dial.
+        info.isRouted     = true;
+        info.bindSettings = bindSettings;
         rememberManualIp(trimmedIp);
         resetManualConnectButton();
         emit connectRequested(info);

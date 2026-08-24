@@ -338,7 +338,7 @@ jobs:
       # target the Build step already linked. The one event-loop wait polls to
       # a deadline, so a loaded runner makes it slower rather than red.
       - name: Test TCI protocol parsing and malformed-input rejection
-        run: ctest --test-dir build -R "^tci_protocol_test$" --output-on-failure
+        run: ctest --test-dir build -R "^(tci_protocol_test|tci_client_codec_test)$" --output-on-failure
 
       # The TX capture path joins the gate for the reason stated above the TCI
       # step: its defects are the invisible kind. Capture negotiation has no UI

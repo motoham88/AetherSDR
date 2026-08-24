@@ -9,6 +9,7 @@
 #include "core/backends/sim/SimBackend.h"     // RFC #4288 demo-mode backend (Route A)
 #include "core/backends/hl2/Hl2Backend.h"      // aetherd Gap A — HL2 backend (family "hl2")
 #include "core/backends/icom/IcomCivBackend.h"  // Icom networked radios (family "icom")
+#include "core/backends/tci/TciBackend.h"      // TCI-client backend (family "tci")
 #include "core/backends/icom/IcomCredentials.h"  // password: keychain, never settings
 #include "core/backends/icom/IcomSettings.h"     // host/user/ports (Principle V)
 #include "core/AppSettings.h"
@@ -678,6 +679,20 @@ std::unique_ptr<IRadioBackend> RadioModel::makeBackend(const QString& family)
     // restored state (Constitution II/III).
     if (family.compare(QLatin1String("icom"), Qt::CaseInsensitive) == 0)
         return std::make_unique<icom::IcomCivBackend>();
+#ifdef HAVE_WEBSOCKETS
+    // Any radio fronted by a TCI server — the k3-tci-bridge project puts an
+    // Elecraft K3/K3S behind one, and ExpertSDR3/SunSDR speak it natively.
+    // A pure seam backend like Icom and HL2, and radio-authoritative, so it
+    // declares no ClientSettingsDomains and is never pushed restored state.
+    //
+    // GUARDED, and the guard is why the sources are listed unconditionally in
+    // CMakeLists: Qt6::WebSockets is an optional find_package, so an
+    // unguarded reference here compiles and then fails at LINK on a
+    // configuration without it. A `tci` request on such a build falls through
+    // to the default below rather than failing to start.
+    if (family.compare(QLatin1String("tci"), Qt::CaseInsensitive) == 0)
+        return std::make_unique<tci::TciBackend>();
+#endif
     // RFC #4288 demo mode: the synthetic radio is selected here like any other
     // family, which is what completes the "wire it through the real SimBackend
     // factory" ask. Unlike HL2 it is a Route A hybrid — it owns a RadioConnection

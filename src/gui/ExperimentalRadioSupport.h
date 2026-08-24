@@ -20,6 +20,11 @@ inline std::optional<ExperimentalRadioDescriptor> experimentalRadioDescriptor(
             QStringLiteral("Icom"),
             QStringLiteral("ShowExperimentalRadioNoticeIcomV1")};
     }
+    if (normalized == QLatin1String("tci")) {
+        return ExperimentalRadioDescriptor{
+            QStringLiteral("TCI"),
+            QStringLiteral("ShowExperimentalRadioNoticeTciV1")};
+    }
     if (normalized == QLatin1String("hl2")) {
         return ExperimentalRadioDescriptor{
             QStringLiteral("Hermes-Lite 2"),

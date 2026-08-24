@@ -65,6 +65,28 @@ public:
     // handshake needs a username and password before the radio will answer with
     // anything useful, which is why the manual page grows credential fields.
     static constexpr const char* kFamilyIcom = "icom";
+    // Any radio fronted by a TCI server: the k3-tci-bridge project puts an
+    // Elecraft K3/K3S behind one, and ExpertSDR3/SunSDR speak TCI natively.
+    // Like Icom this family has no anonymous probe worth doing — a WebSocket
+    // handshake either completes or it does not — so the connect IS the probe.
+    // Unlike every other family its port genuinely varies between servers
+    // (the bridge listens on 50001, ExpertSDR3 on 40001), so the address
+    // field accepts an optional `host:port` suffix.
+    static constexpr const char* kFamilyTci = "tci";
+
+    // The TCI port to assume when the operator does not name one.
+    static constexpr quint16 kDefaultTciPort = 50001;
+
+    // ONE list of the families this panel can dial, and one normalizer over
+    // it. These exist because the family set was previously spelled out
+    // inline in three places that had already drifted apart in behaviour, so
+    // adding a family meant finding all three — the same "find every list"
+    // failure mode IRadioBackend.h documents for `m_family != "flex"` checks.
+    [[nodiscard]] static QStringList knownFamilies();
+    // Returns the canonical spelling, or flex for anything unrecognised —
+    // which is what an older profile written before the selector existed
+    // should be read as.
+    [[nodiscard]] static QString normalizeFamily(const QString& family);
 
     // IConnectionAutomation — engine-facing connect/disconnect/dialog hook.
     QList<RadioInfo> automationLocalRadios() const override;
