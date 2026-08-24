@@ -22,6 +22,7 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
 #include <QSettings>
@@ -30,6 +31,7 @@
 #include <QSpinBox>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTest>
 
 #include <cstdio>
 #include <functional>
@@ -73,6 +75,9 @@ public:
         connect(&m_server, &QTcpServer::newConnection, this, [this]() {
             m_connection = m_server.nextPendingConnection();
             ++m_connections;
+            connect(m_connection, &QTcpSocket::readyRead, this, [this]() {
+                m_received += m_connection->readAll();
+            });
             if (m_autoReplay) {
                 replay();
             }
@@ -81,6 +86,16 @@ public:
 
     quint16 port() const { return m_server.serverPort(); }
     int connections() const { return m_connections; }
+    // Whatever the tile has sent us. The keepalive NUL is in here too.
+    QByteArray received() const { return m_received; }
+
+    void send(const QByteArray& data)
+    {
+        if (m_connection != nullptr) {
+            m_connection->write(data);
+            m_connection->flush();
+        }
+    }
 
     // Accept the next connection but stay silent — the reconnect window the
     // tile has to survive without going live on a pre-drop roster.
@@ -106,9 +121,20 @@ public:
 private:
     QTcpServer m_server;
     QTcpSocket* m_connection{nullptr};
+    QByteArray m_received;
     int m_connections{0};
     bool m_autoReplay{true};
 };
+
+// The rotator half of the same connection.
+const QByteArray kRotorPoint =
+    QByteArrayLiteral("POINT\x1f" "Rotor\x1f" "50.4\x1f" "0\x1f" "0\r\n");
+
+QByteArray point(const char* name, const char* heading)
+{
+    return QByteArrayLiteral("POINT\x1f") + name + QByteArrayLiteral("\x1f")
+           + heading + QByteArrayLiteral("\x1f" "0\x1f" "0\r\n");
+}
 
 // The same roster, but delivered the way the wire actually delivers it: one
 // record per write with event-loop turns in between. FakeDevice's single
@@ -237,10 +263,15 @@ void testShowsOnlyTheChosenSwitch()
         return portButton(applet, QStringLiteral("Beam-20")) != nullptr;
     });
     report("the chosen switch's ports are drawn", built);
+    // Scoped to the port container rather than the whole tile: the tile also
+    // carries Connect and, when a rotator is reporting, Turn, and counting
+    // those made this check a tally of unrelated widgets.
+    auto* portHost = applet.findChild<QWidget*>(QStringLiteral("greenHeronPorts"));
     report("only the chosen switch is drawn",
-           applet.findChildren<QPushButton*>().size()
-               == 3 + 1 /* the Connect button */,
-           std::to_string(applet.findChildren<QPushButton*>().size()));
+           portHost != nullptr && portHost->findChildren<QPushButton*>().size() == 3,
+           std::to_string(portHost == nullptr
+                              ? -1
+                              : portHost->findChildren<QPushButton*>().size()));
 
     // Selected on this switch → lit and clickable.
     QPushButton* selected = portButton(applet, QStringLiteral("Beam-20"));
@@ -486,6 +517,242 @@ void testPartialRosterKeepsTheRememberedSwitch()
            (combo->currentText() + " vs " + applet.selectedSwitch()).toStdString());
 }
 
+// ── Rotator ─────────────────────────────────────────────────────────────────
+
+// Connect a tile to `device` and wait until the antenna roster is on screen.
+void bringUp(GreenHeronApplet& applet, FakeDevice& device)
+{
+    applet.findChild<QLineEdit*>(QStringLiteral("greenHeronHost"))
+        ->setText(QStringLiteral("127.0.0.1"));
+    applet.findChild<QSpinBox*>(QStringLiteral("greenHeronPort"))
+        ->setValue(device.port());
+    applet.findChild<QPushButton*>(QStringLiteral("greenHeronConnect"))->click();
+    waitFor([&]() { return applet.model()->isReady(); });
+}
+
+void testRotorAppearsOnlyWhileItIsReporting()
+{
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+
+    auto* section = applet.findChild<QWidget*>(QStringLiteral("greenHeronRotorSection"));
+    report("the tile has a rotator section", section != nullptr);
+    // A server whose rotator controller is off announces nothing at all, and
+    // most installations have no rotator — an empty rotator row would be a
+    // permanent fixture claiming something the wire never said.
+    report("no rotator row while the device reports no heading",
+           section != nullptr && !section->isVisible());
+    report("and nothing names a rotator", applet.selectedRotor().isEmpty(),
+           applet.selectedRotor().toStdString());
+
+    device.send(kRotorPoint);
+    const bool appeared = waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+    report("a POINT brings the rotator row up", appeared);
+    report("the row is visible", section != nullptr && section->isVisible());
+
+    auto* readout = applet.findChild<QLabel*>(QStringLiteral("greenHeronRotorReadout"));
+    report("the readout shows the REPORTED heading",
+           readout != nullptr && readout->text() == QStringLiteral("50.4°"),
+           readout != nullptr ? readout->text().toStdString() : "missing");
+}
+
+void testChoosingAHeadingDoesNotSendIt()
+{
+    // The invariant that is easiest to "improve" away. There is no stop or
+    // park verb in this protocol, so a rotation that starts cannot be recalled
+    // in software — typing a heading may only PROPOSE one.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(kRotorPoint);
+    waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+
+    auto* heading = applet.findChild<QLineEdit*>(QStringLiteral("greenHeronHeading"));
+    report("the tile has a heading field", heading != nullptr);
+    heading->setText(QStringLiteral("89.0"));
+    waitFor([&]() { return false; }, 200);
+    report("typing a heading transmits nothing",
+           !device.received().contains(QByteArrayLiteral("TURN")),
+           device.received().toHex(' ').toStdString());
+
+    // ...and Turn is what transmits.
+    applet.findChild<QPushButton*>(QStringLiteral("greenHeronTurn"))->click();
+    const bool sent = waitFor([&]() {
+        return device.received().contains(
+            QByteArrayLiteral("TURN\x1f" "Rotor\x1f" "89.0\r"));
+    });
+    report("Turn sends the captured command bytes", sent,
+           device.received().toHex(' ').toStdString());
+}
+
+void testTheReadoutNeverShowsWhatWasAskedFor()
+{
+    // Measured on real hardware: a commanded 64.3 settled at a mean 62.9 and
+    // dithered over several degrees. Showing the commanded value as the
+    // position would put a number on screen that no antenna is pointing at.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(QByteArrayLiteral("POINT\x1f" "Rotor\x1f" "62.9\x1f" "0\x1f" "0\r\n"));
+    waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+
+    applet.findChild<QLineEdit*>(QStringLiteral("greenHeronHeading"))
+        ->setText(QStringLiteral("64.3"));
+    applet.findChild<QPushButton*>(QStringLiteral("greenHeronTurn"))->click();
+    waitFor([&]() {
+        return device.received().contains(QByteArrayLiteral("TURN"));
+    });
+
+    auto* readout = applet.findChild<QLabel*>(QStringLiteral("greenHeronRotorReadout"));
+    const QString text = readout != nullptr ? readout->text() : QString{};
+    report("the reported heading still leads the readout",
+           text.startsWith(QStringLiteral("62.9°")), text.toStdString());
+    report("the commanded heading is labelled as asked, not as position",
+           text.contains(QStringLiteral("asked 64.3°")), text.toStdString());
+    // 62.9 against 64.3 is 1.4 — and it is shown as a difference and nothing
+    // more. No arrival verdict is possible at this hardware's ±3.8° rest
+    // dither; any threshold would flicker.
+    report("the gap is shown as a delta", text.contains(QLatin1String("1.4")),
+           text.toStdString());
+    report("and no arrival verdict is claimed",
+           !text.contains(QLatin1String("target"), Qt::CaseInsensitive)
+               && !text.contains(QLatin1String("arrived"), Qt::CaseInsensitive),
+           text.toStdString());
+}
+
+void testARotorGoingQuietTakesTheControlsWithIt()
+{
+    // Same phantom as the model test, seen from the tile: the socket stays up
+    // and the switches keep reporting, so the ONLY thing that says the
+    // controller was switched off is the absence of POINT.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(kRotorPoint);
+    waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+
+    // Waiting on the WIDGET, not on selectedRotor(): liveness is a pure
+    // function of elapsed time, so the name goes empty the instant the
+    // deadline passes, while the tile only repaints on the model's next poll.
+    // Asserting the visibility off the first predicate raced that poll.
+    auto* section = applet.findChild<QWidget*>(QStringLiteral("greenHeronRotorSection"));
+    const bool gone = waitFor(
+        [&]() { return section != nullptr && !section->isVisible(); },
+        GreenHeron::kRotorSilentAfterMs + 5000);
+    report("the rotator row goes away when the heading stops", gone);
+    report("and nothing still names a rotator", applet.selectedRotor().isEmpty(),
+           applet.selectedRotor().toStdString());
+    report("the antenna list is untouched — it is a different half of the device",
+           portButton(applet, QStringLiteral("Beam-20")) != nullptr
+               && applet.model()->isReady());
+}
+
+void testARotorTheOperatorDidNotChooseIsNeverAimed()
+{
+    // The switch half learned this the hard way: falling back to "whatever is
+    // first" repoints the tile at hardware the operator never selected. It is
+    // worse here. Pick Rotor-B, let B's controller go off, and a fallback
+    // would leave Turn aiming Rotor-A — a rotation with no stop verb to
+    // recall it.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(point("Rotor-A", "10.0") + point("Rotor-B", "200.0"));
+    waitFor([&]() { return applet.model()->rotorNames().size() == 2; });
+
+    auto* combo = applet.findChild<QComboBox*>(QStringLiteral("greenHeronRotor"));
+    report("the chooser appears once there are two rotators",
+           combo != nullptr && combo->isVisible());
+    combo->setCurrentText(QStringLiteral("Rotor-B"));
+    report("the operator's rotator is the one shown",
+           applet.selectedRotor() == QLatin1String("Rotor-B"),
+           applet.selectedRotor().toStdString());
+
+    // Only B's controller goes off. A keeps reporting throughout, which is
+    // what makes this discriminating: a fallback would have something to fall
+    // back TO.
+    auto* section = applet.findChild<QWidget*>(QStringLiteral("greenHeronRotorSection"));
+    QDeadlineTimer deadline(GreenHeron::kRotorSilentAfterMs + 5000);
+    while (!deadline.hasExpired() && section->isVisible()) {
+        device.send(point("Rotor-A", "10.0"));
+        waitFor([&]() { return false; }, 250);
+    }
+    report("Rotor-A is still reporting",
+           applet.model()->isRotorLive(QStringLiteral("Rotor-A")));
+    report("the tile does NOT fall back to the other rotator",
+           applet.selectedRotor().isEmpty(), applet.selectedRotor().toStdString());
+    report("and the controls are gone rather than aimed elsewhere",
+           !section->isVisible());
+}
+
+void testAHeadingTypedWithACommaStillReachesTheWireAsADot()
+{
+    // Driven through real keystrokes, not setText(): setText bypasses the
+    // validator, which is the half a human actually meets. QDoubleValidator
+    // answers Intermediate for a foreign decimal mark, so "64,3" does land in
+    // the field — and would go out as a group-separated 643 if sendTurn() did
+    // not normalise it.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(kRotorPoint);
+    waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+
+    auto* heading = applet.findChild<QLineEdit*>(QStringLiteral("greenHeronHeading"));
+    heading->setFocus();
+    QTest::keyClicks(heading, QStringLiteral("64,3"));
+    report("a comma reaches the field rather than being swallowed",
+           heading->text() == QLatin1String("64,3"), heading->text().toStdString());
+
+    applet.findChild<QPushButton*>(QStringLiteral("greenHeronTurn"))->click();
+    const bool sent = waitFor([&]() {
+        return device.received().contains(
+            QByteArrayLiteral("TURN\x1f" "Rotor\x1f" "64.3\r"));
+    });
+    report("and goes out as a dot, not as 643", sent,
+           device.received().toHex(' ').toStdString());
+}
+
+void testTheAskedHeadingDoesNotOutliveThePowerCycle()
+{
+    // "asked 64.3° · Δ…" describes one rotator on one power cycle. Surviving
+    // the controller going off and coming back would show a commanded heading
+    // this session never sent, beside a live reading.
+    FakeDevice device;
+    GreenHeronApplet applet;
+    applet.show();
+    bringUp(applet, device);
+    device.send(kRotorPoint);
+    waitFor([&]() { return !applet.selectedRotor().isEmpty(); });
+
+    applet.findChild<QLineEdit*>(QStringLiteral("greenHeronHeading"))
+        ->setText(QStringLiteral("89.0"));
+    applet.findChild<QPushButton*>(QStringLiteral("greenHeronTurn"))->click();
+    auto* readout = applet.findChild<QLabel*>(QStringLiteral("greenHeronRotorReadout"));
+    report("the asked heading is shown while the rotator is live",
+           readout->text().contains(QStringLiteral("asked 89.0°")),
+           readout->text().toStdString());
+
+    auto* section = applet.findChild<QWidget*>(QStringLiteral("greenHeronRotorSection"));
+    waitFor([&]() { return !section->isVisible(); },
+            GreenHeron::kRotorSilentAfterMs + 5000);
+
+    // Controller back on, reporting a heading nobody commanded this session.
+    device.send(point("Rotor", "12.0"));
+    const bool back = waitFor([&]() { return section->isVisible(); });
+    report("the rotator comes back", back);
+    report("with no stale asked heading beside it",
+           readout->text() == QStringLiteral("12.0°"),
+           readout->text().toStdString());
+}
+
 void testConfigIsOneOwnedObject()
 {
     // Constitution Principle V: the feature's configuration is one nested
@@ -542,6 +809,13 @@ int main(int argc, char** argv)
     testSwitchChoiceAndAddressPersist();
     testPartialRosterKeepsTheRememberedSwitch();
     testConfigIsOneOwnedObject();
+    testRotorAppearsOnlyWhileItIsReporting();
+    testChoosingAHeadingDoesNotSendIt();
+    testTheReadoutNeverShowsWhatWasAskedFor();
+    testARotorGoingQuietTakesTheControlsWithIt();
+    testARotorTheOperatorDidNotChooseIsNeverAimed();
+    testAHeadingTypedWithACommaStillReachesTheWireAsADot();
+    testTheAskedHeadingDoesNotOutliveThePowerCycle();
 
     std::printf(g_failed ? "\n%d check(s) FAILED\n" : "\nAll checks passed\n", g_failed);
     return g_failed ? 1 : 0;
