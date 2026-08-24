@@ -13,7 +13,6 @@
 #include <memory>
 
 class QWebSocket;
-class QTimer;
 
 namespace AetherSDR {
 
@@ -100,7 +99,6 @@ private:
     [[nodiscard]] static QString panId() { return QStringLiteral("0"); }
 
     QWebSocket* m_socket = nullptr;
-    QTimer*     m_reconnectTimer = nullptr;
 
     RadioCapabilities m_caps;
     bool m_connected = false;      // TCI `ready;` seen, not merely socket-open

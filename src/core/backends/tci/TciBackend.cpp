@@ -3,7 +3,6 @@
 #ifdef HAVE_WEBSOCKETS
 
 #include <QLoggingCategory>
-#include <QTimer>
 #include <QUrl>
 #include <QWebSocket>
 
@@ -63,10 +62,18 @@ TciBackend::TciBackend(QObject* parent)
 
 TciBackend::~TciBackend()
 {
-    // The socket is a child QObject and would be destroyed anyway; closing
-    // first means the server sees a clean close rather than a dropped TCP
-    // connection it has to time out.
-    if (m_socket) m_socket->abort();
+    if (!m_socket) return;
+
+    // STOP THE STREAM FIRST, on this path too. disconnectRadio() does it, but
+    // app teardown does not go through disconnectRadio() — it destroys the
+    // backend — so without this a quit while receiving leaves the server
+    // encoding audio for a client that no longer exists until its own timeout
+    // notices. Cheap to send and harmless if the socket is already going away.
+    if (m_socketOpen) sendCommand(TciClientCodec::audioStop(m_trx));
+
+    // Then close rather than abort, so the server sees a clean WebSocket close
+    // instead of a dropped TCP connection it has to time out separately.
+    m_socket->close();
 }
 
 // ── connection lifecycle ───────────────────────────────────────────────────
@@ -145,9 +152,19 @@ void TciBackend::onSocketConnected()
 void TciBackend::onSocketDisconnected()
 {
     const bool wasConnected = m_connected;
-    m_socketOpen = false;
-    m_connected = false;
     qCInfo(lcTci) << "TCI server closed the connection";
+
+    // CLEAR EVERYTHING, not just the two connection flags. A server-side drop
+    // — the Pi rebooting, systemd restarting the bridge — has to leave exactly
+    // the state a fresh connect would find, and the flag that matters most is
+    // m_slicePublished: left true, publishInitialSlice() no-ops on the next
+    // session and the slice never comes back. The stale Resampler is the same
+    // shape of problem, still holding filter state for a stream that ended.
+    //
+    // This path is reachable ONLY from the server side; a client-initiated
+    // disconnect goes through disconnectRadio(), which resets separately. That
+    // asymmetry is exactly why this was missed.
+    resetSessionState();
     if (wasConnected) emit disconnected();
 }
 
