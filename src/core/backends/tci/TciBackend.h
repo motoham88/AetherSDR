@@ -87,6 +87,7 @@ private slots:
 private:
     void handleEvent(const TciEvent& event);
     void publishInitialSlice();
+    void publishMeterDefs();
     void applyDeviceIdentity();
     void sendCommand(const QString& command);
     void resetSessionState();

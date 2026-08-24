@@ -250,10 +250,28 @@ void TciBackend::handleEvent(const TciEvent& event)
         // half-populated struct it would see a few milliseconds earlier.
         if (!m_connected) {
             m_connected = true;
-            publishInitialSlice();
             qCInfo(lcTci) << "TCI session ready:" << m_caps.model
                           << "canTransmit=" << m_caps.canTransmit;
             emit connected();
+
+            // BEFORE the first value can arrive. A meter VALUE whose meter
+            // has no definition is silently discarded — MeterModel::
+            // updateValueByName looks the id up and returns false when it
+            // finds nothing — so without this every rx_smeter reading is
+            // computed, emitted, and dropped on the floor. That is the
+            // orphaned-meter-seam defect IcomCivBackend and SimBackend both
+            // carry warnings about, and it is invisible from here: the
+            // backend goes on emitting correct values forever.
+            publishMeterDefs();
+
+            // AFTER connected(), never before — the ordering IcomCivBackend
+            // uses, and it is load-bearing rather than stylistic. RadioModel
+            // reacts to connected() by staging and clearing the previous
+            // session's slice and pan models, so a slice published first is
+            // created and then immediately swept away with them. Measured
+            // against a live K3: the session came up with the radio reporting
+            // ready, audio streaming, and sliceCount 0.
+            publishInitialSlice();
 
             // Ask for RX audio only once the session is real. The bridge keys
             // its per-client stream off this and sends nothing until it
@@ -366,6 +384,28 @@ void TciBackend::handleEvent(const TciEvent& event)
     // that grows one.
 }
 
+void TciBackend::publishMeterDefs()
+{
+    // ONE meter. TCI's only receive telemetry is `rx_smeter`, and the source/
+    // name/unit triple matches what IcomMeters and Hl2Backend already publish
+    // for the same reading, so the existing S-meter consumers find it without
+    // knowing which family produced it.
+    MeterDef sMeter;
+    sMeter.index  = 0;
+    sMeter.source = QStringLiteral("SLC");
+    sMeter.name   = QStringLiteral("LEVEL");
+    sMeter.unit   = QStringLiteral("dBm");
+    sMeter.low    = -140.0;
+    sMeter.high   = -10.0;
+    // RELATIVE, and said out loud. TCI carries no calibration and the bridge
+    // this was developed against records two failed attempts to establish one
+    // against the radio's own attenuator — both of which were measuring
+    // propagation rather than the step. An operator reading these as absolute
+    // dBm would be reading a number nobody has justified.
+    sMeter.description = QStringLiteral("Receive signal level (uncalibrated — relative)");
+    emit meterDefined(sMeter);
+}
+
 void TciBackend::publishInitialSlice()
 {
     if (m_slicePublished) return;
@@ -378,6 +418,20 @@ void TciBackend::publishInitialSlice()
     s.panId  = panId();
     s.inUse  = true;
     s.active = true;
+
+    // SEEDED FROM THE INIT BURST, which is the whole reason those values are
+    // cached as they stream past. The burst reports vfo/modulation/
+    // rx_filter_band BEFORE the `ready;` that lets this slice exist, so the
+    // per-field handlers emitted them into a slice that was not there yet and
+    // every one was dropped. Measured against a live K3 sitting on 14.028970
+    // CWL with a 400 Hz filter: the slice came up at 0 Hz in USB, and stayed
+    // there until the operator happened to touch something on the radio.
+    if (m_vfoHz > 0) s.frequency = static_cast<double>(m_vfoHz) / 1.0e6;   // MHz
+    if (!m_mode.isEmpty()) s.mode = m_mode;
+    if (m_filterHighHz > m_filterLowHz) {
+        s.filterLow  = m_filterLowHz;
+        s.filterHigh = m_filterHighHz;
+    }
     // One receiver IS the transmitter here. Leaving this unset makes
     // RadioModel's interlock refuse every key attempt with "No transmit slice
     // is assigned" before the backend is ever asked — a refusal that is

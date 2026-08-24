@@ -1,4 +1,5 @@
 #include "AutomationServer.h"
+#include "core/RadioFamilies.h"
 #include "core/RadioCertification.h"
 #include "LogManager.h"
 #include "AppSettings.h"          // StationName (restore the user's real station name)
@@ -5826,7 +5827,7 @@ QJsonObject AutomationServer::doConnect(const QString& action,
     }
 
     if (a == QLatin1String("ip")) {
-        // connect ip <host-or-ip> [flex|hl2|icom]
+        // connect ip <host-or-ip> [flex|hl2|icom|tci]
         //
         // The optional family picks which wire protocol to probe. When it is
         // omitted, DISCOVERY decides (#4912): an address the radio list already
@@ -5853,15 +5854,20 @@ QJsonObject AutomationServer::doConnect(const QString& action,
         QString family;
         if (ipTokens.size() > 1) {
             family = ipTokens.at(1).toLower();
-            if (family != QLatin1String("flex") && family != QLatin1String("hl2")
-                && family != QLatin1String("icom")) {
+            // Validated against the SHARED list rather than an inline one.
+            // This check was the easiest of the four family lists to miss: a
+            // family could be wired all the way through the picker, the
+            // factory and the backend and still be rejected here, so the
+            // bridge could not drive a radio the GUI could.
+            if (!RadioFamilies::isKnown(family)) {
                 return err(QStringLiteral(
-                               "connect ip radio type must be flex, hl2 or icom, got '%1'")
-                               .arg(ipTokens.at(1)));
+                               "connect ip radio type must be %1, got '%2'")
+                               .arg(RadioFamilies::describeAll(), ipTokens.at(1)));
             }
         }
         if (ipTokens.size() > 2) {
-            return err(QStringLiteral("connect ip takes at most <host-or-ip> [flex|hl2|icom]"));
+            return err(QStringLiteral("connect ip takes at most <host-or-ip> [%1]")
+                           .arg(RadioFamilies::all().join(QLatin1Char('|'))));
         }
 
         // Match on the textual address the list itself publishes, so a caller

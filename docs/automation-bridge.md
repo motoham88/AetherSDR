@@ -2147,7 +2147,7 @@ so `connect show` is safe when the dialog is already open. `connect local first`
 captures the first currently discovered local radio's serial before scheduling
 the request, so the response and deferred connect target stay consistent.
 `connect local serial <serial>` selects by discovery serial. `connect ip
-<host-or-ip> [flex|hl2|icom]` uses the manual **Connect by IP** probe path; if the
+<host-or-ip> [flex|hl2|icom|tci]` uses the manual **Connect by IP** probe path; if the
 probe finds a radio, the panel emits its normal `connectRequested` signal and
 `MainWindow` performs the standard Multi-Flex/client-slot checks before
 `RadioModel` connects.

@@ -3,6 +3,7 @@
 #include "core/backends/hl2/Hl2Discovery.h"   // shared nickname + MAC->serial helpers
 #include "core/backends/icom/IcomCredentials.h"  // password -> OS keychain, never settings
 #include "core/backends/icom/IcomSettings.h"     // host/user/ports (Principle V)
+#include "core/RadioFamilies.h"               // the one list of dialable families
 #include "core/backends/icom/IcomModels.h"       // knownModels() -> the chooser's items
 #include "core/backends/hl2/MetisProtocol.h"  // discoveryRequest/parseDiscoveryReply, kMetisPort
 #include "core/backends/sim/SimBackend.h"
@@ -1412,7 +1413,7 @@ bool ConnectionPanel::automationConnectByIp(const QString& hostOrIp,
         setAutomationError(
             error,
             QStringLiteral("unknown radio family '%1' (use %2)")
-                .arg(family.trimmed(), knownFamilies().join(QStringLiteral(", "))));
+                .arg(family.trimmed(), RadioFamilies::describeAll()));
         return false;
     }
 
@@ -2088,18 +2089,14 @@ RadioBindSettings ConnectionPanel::currentManualBindSettings(bool* staleSelectio
 
 QStringList ConnectionPanel::knownFamilies()
 {
-    // Order is the order the manual selector offers them.
-    return {QString::fromLatin1(kFamilyFlex),
-            QString::fromLatin1(kFamilyHl2),
-            QString::fromLatin1(kFamilyIcom),
-            QString::fromLatin1(kFamilyTci)};
+    // Delegated, not duplicated. AutomationServer's `connect ip` verb needs
+    // the same list and lives below the GUI, so the list itself is in core.
+    return RadioFamilies::all();
 }
 
 QString ConnectionPanel::normalizeFamily(const QString& family)
 {
-    const QString lowered = family.trimmed().toLower();
-    return knownFamilies().contains(lowered) ? lowered
-                                             : QString::fromLatin1(kFamilyFlex);
+    return RadioFamilies::normalize(family);
 }
 
 QString ConnectionPanel::currentManualFamily() const
