@@ -7127,6 +7127,11 @@ void MainWindow::applyCapabilitiesToUi(bool connected, const RadioCapabilities& 
     // way (IcomCivBackend: `hasScope ? receivers : 0`).
     if (connected && caps.maxPanadapters <= 0) {
         setPanadapterConnectionAnimation(false);
+        // Seed the band strip here too. frequencyChanged only fires on a
+        // TRANSITION, so without an initial push the axis would stay at its
+        // construction default until the operator first turned the dial —
+        // the same bug with a longer fuse.
+        recenterScopelessSpectrumOnSlice(activeSlice());
     }
 
     // ── Mic sources: MIC / BAL / LINE / ACC are Flex connectors ────────────
@@ -8970,6 +8975,48 @@ SpectrumWidget* MainWindow::spectrum() const
 {
     return m_panStack ? m_panStack->activeSpectrum()
                       : (m_panApplet ? m_panApplet->spectrumWidget() : nullptr);
+}
+
+void MainWindow::recenterScopelessSpectrumOnSlice(const SliceModel* slice)
+{
+    // A radio with NO panadapter still draws the band-plan strip and the
+    // frequency axis, and nothing was ever setting their range: SpectrumWidget
+    // keeps its CONSTRUCTION default of 14.225 MHz, so a K3 sitting on 40 m
+    // showed 20 m band edges under a correct VFO readout. Not stale state from
+    // a previous session — a value that had never been written at all.
+    //
+    // Gated on the declared capability, NOT on RadioModel::maxPanadapters(),
+    // which is deliberately a different question and never answers zero (it
+    // falls back to the FlexLib platform table). Same trap as the connect
+    // splash.
+    if (m_radioModel.backendCapabilities().maxPanadapters > 0)
+        return;
+    // And belt-and-braces: never write geometry a PanadapterModel owns. A
+    // radio-owned pane claims its centre and span from its own wire, and
+    // writing over that is the #4671 shape — two owners racing for one value.
+    if (!m_radioModel.panadapters().isEmpty())
+        return;
+    if (!m_radioModel.isConnected())
+        return;
+    // The ACTIVE slice, because the axis follows what the operator is on.
+    if (!slice || !slice->isActive())
+        return;
+
+    SpectrumWidget* sw = spectrum();
+    if (!sw)
+        return;
+
+    const double centerMhz = slice->frequency();
+    // KEEP THE EXISTING SPAN rather than inventing one. The default 0.180 MHz
+    // reads correctly (7.110-7.290 spans the 40 m CW and phone segments), and
+    // reusing whatever is there means an operator who has zoomed keeps it.
+    const double bandwidthMhz = sw->bandwidthMhz();
+    if (centerMhz <= 0.0 || bandwidthMhz <= 0.0)
+        return;
+    if (qFuzzyCompare(sw->centerMhz(), centerMhz))
+        return;
+
+    sw->setFrequencyRangeImmediate(centerMhz, bandwidthMhz);
 }
 
 // ── UI Scale helpers ────────────────────────────────────────────────────

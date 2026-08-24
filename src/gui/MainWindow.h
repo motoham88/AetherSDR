@@ -369,6 +369,13 @@ private:
                                            bool reinitializePcInput);
     SliceModel* activeSlice() const;
 
+    // Keep the band-plan strip and frequency axis on the band the operator is
+    // actually on, for a radio that declares NO panadapter and therefore never
+    // sends the geometry that normally drives them. No-op on every radio that
+    // has one. See the definition for why the capability, not
+    // RadioModel::maxPanadapters(), is the gate.
+    void recenterScopelessSpectrumOnSlice(const SliceModel* slice);
+
     // Push the connected backend's reported tuning range into one overlay
     // menu's band panel, so bands the radio cannot reach are disabled rather
     // than tuning it somewhere it hears nothing. A backend that reports no

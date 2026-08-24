@@ -1857,6 +1857,19 @@ void MainWindow::onSliceAdded(SliceModel* s)
     });
     restoreCenterLockForPan(s->panId());
 
+    // A radio with no panadapter never reports pan geometry, so the band-plan
+    // strip and frequency axis have nothing driving them and sit at the
+    // widget's construction default. Follow the slice instead. No-op on every
+    // radio that has a panadapter — the helper gates on the capability.
+    connect(s, &SliceModel::frequencyChanged, this, [this, s](double) {
+        recenterScopelessSpectrumOnSlice(s);
+    });
+    // The ACTIVE slice is what the axis follows, so a change of which slice is
+    // active has to re-point it as well as a change of frequency.
+    connect(s, &SliceModel::activeChanged, this, [this, s](bool) {
+        recenterScopelessSpectrumOnSlice(s);
+    });
+
     // Connect slice state changes → spectrum overlay updates
     connect(s, &SliceModel::frequencyChanged, this, [this, s](double mhz) {
         // Don't snap overlay back to stale radio-confirmed freq during active
@@ -2234,6 +2247,14 @@ void MainWindow::onSliceAdded(SliceModel* s)
 
     refreshSliceLinkUi();
     updateAetherDspModePolicy();
+
+    // Seed the band strip for a radio with no panadapter, HERE and not only
+    // from the frequencyChanged hook above. The slice is materialised and its
+    // delta applied BEFORE sliceAdded reaches this slot, so the frequency it
+    // arrived with has already been emitted and the hook we just connected
+    // missed it. Without this the axis holds its construction default until
+    // the operator first turns the dial.
+    recenterScopelessSpectrumOnSlice(s);
 }
 
 void MainWindow::onSliceRemoved(int id)
