@@ -310,19 +310,32 @@ jobs:
       - name: Test HL2 AM/SAM DC blocker
         run: ctest --test-dir build -R "^hl2_am_dcblock_test$" --output-on-failure
 
-      # The Green Heron Everyware antenna switch. Until this step the three
-      # suites ran in no job at all — add_test() alone registers a target,
-      # it does not put it on a gate — so "CI green" meant only that they
-      # linked. That matters more here than for most tiles: these buttons
-      # close relays on a live antenna line, and the defect this gate now
-      # pins (a reconnect enabling a pre-drop roster before the device has
+      # The Green Heron Everyware antenna switch and rotator. Until this step
+      # the three suites ran in no job at all — add_test() alone registers a
+      # target, it does not put it on a gate — so "CI green" meant only that
+      # they linked. That matters more here than for most tiles: these
+      # controls close relays on a live antenna line and start rotations that
+      # no command in this protocol can stop, and the defect this gate pins
+      # (a reconnect enabling a pre-drop roster before the device has
       # replayed) passed every end-state assertion in the model suite while
-      # the window was wide open. Measured, not assumed: 0.00 s protocol,
-      # 2.41 s model, 1.06 s applet, against targets the Build step already
-      # linked. No hardware — the model and applet suites drive the real
-      # QTcpSocket path against a stand-in server on loopback; the applet
-      # suite runs offscreen (set on the target, not here).
-      - name: Test Green Heron antenna switch
+      # the window was wide open. No hardware — the model and applet suites
+      # drive the real QTcpSocket path against a stand-in server on loopback;
+      # the applet suite runs offscreen (set on the target, not here).
+      #
+      # Measured, not assumed: 0.01 s protocol, 13.5 s model, 11.5 s applet —
+      # 25 s total, against targets the Build step already linked. It was 3.3 s
+      # before the rotator landed, and the whole of the increase is TWO REAL
+      # 10 s WAITS, one per suite, for GreenHeron::kRotorSilentAfterMs.
+      #
+      # Those waits are not padding and they are not shortenable. A rotator is
+      # announced only while its controller is powered on, and switching that
+      # controller off is not a socket event: ADD and POINT simply stop while
+      # the switch records carry on down the same connection. Silence is the
+      # only evidence that exists, so the failure being tested — a heading
+      # sitting on screen beside a Turn button that would aim a controller
+      # that is off — cannot be provoked by sending anything. A timeout that
+      # a test may shorten is a timeout the test is no longer measuring.
+      - name: Test Green Heron antenna switch and rotator
         run: ctest --test-dir build -R "^green_heron_(protocol|model|applet)_test$" --output-on-failure
 
       # ulanzi_mapping_migration_test was on this gate (added by #4834) and is
