@@ -335,6 +335,11 @@ jobs:
       # sitting on screen beside a Turn button that would aim a controller
       # that is off — cannot be provoked by sending anything. A timeout that
       # a test may shorten is a timeout the test is no longer measuring.
+      #
+      # check-macos runs the same three suites, and not for symmetry: a test
+      # here waited on isConnected() before an isReady()-gated call and passed
+      # only because a Linux loopback has the roster buffered before `connected`
+      # fires. It failed 5/5 on macOS. Keep the two steps in step.
       - name: Test Green Heron antenna switch and rotator
         run: ctest --test-dir build -R "^green_heron_(protocol|model|applet)_test$" --output-on-failure
 
@@ -946,6 +951,29 @@ jobs:
 
       - name: Run macOS MNR regression test
         run: ctest --test-dir build -R '^mac_nr_filter_test$' --output-on-failure
+
+      # The same three suites the Linux `build` job gates on, deliberately run
+      # a second time here rather than trusted from there. They are pure
+      # loopback against a stand-in server — no hardware, no display, and the
+      # applet suite sets offscreen on the target — so the only thing a second
+      # platform costs is wall clock, and the only thing it adds is the class
+      # of defect that is invisible on one kernel's socket timing.
+      #
+      # That is not hypothetical: this step exists because green_heron_model_test
+      # failed 5/5 on macOS while the Linux gate was green. A test waited on
+      # isConnected() and then made an isReady()-gated call; on a Linux loopback
+      # the roster is in the socket buffer before `connected` fires, so it
+      # passed by accident, and on macOS it did not. The test is fixed and
+      # FakeDevice now models that ordering deterministically, so Linux catches
+      # it too — but "Linux happened to buffer it" is exactly the assumption a
+      # single-platform gate cannot notice it is making.
+      #
+      # Cost is the same ~25 s as the Linux step and for the same reason: two
+      # real GreenHeron::kRotorSilentAfterMs waits, one per suite, measuring a
+      # timeout that a test may not shorten without ceasing to measure it. The
+      # targets are already linked by the Build step above.
+      - name: Test Green Heron antenna switch and rotator
+        run: ctest --test-dir build -R '^green_heron_(protocol|model|applet)_test$' --output-on-failure
 
       - name: Run ASR GPU probe test (#4535 regression)
         # arm64 runner = Apple Silicon: exercises the real Metal device init and
