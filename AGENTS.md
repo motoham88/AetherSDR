@@ -210,6 +210,8 @@ include directory belong only in x86 build graphs. After configuring any ARM
 build, `rg 'rnnoise/src/x86' <build-dir>/build.ninja` must find no matches.
 
 Full dependency list is in `README.md` — don't duplicate it here.
+Runtime knobs (there is no CLI beyond `--config`) are in
+**[Environment Variables](#environment-variables--the-runtime-knobs)**.
 
 ### Adding a test — declare it in `tests/tests.cmake`, not `CMakeLists.txt`
 
@@ -1011,3 +1013,95 @@ first-class typed tools, alongside robustness helpers (`wait_for`,
 gate applies — keying verbs stay behind `AETHER_AUTOMATION_ALLOW_TX`. Regenerate
 the verb→tool tables with `tools/gen_bridge_docs.py` (a CI check fails on drift).
 See `docs/automation-bridge.md` for setup and the tool catalog.
+
+## Environment Variables — the runtime knobs
+
+AetherSDR has essentially **no command-line interface**: there is no
+`QCommandLineParser`, so no `--help`, no `--version`, and unrecognised
+arguments are silently ignored. The single exception is `--config`, checked
+as `argv[1]` in `src/main.cpp` before any GUI initialisation — the recovery
+path when a stored setting stops the GUI from starting (`AetherSDR --config`
+with no command prints its own usage; `list`, `get`, `set`, `unset`,
+`export`, `features`, `path`). A *running* instance holds its own in-memory
+cache and will not see `--config` edits until it restarts.
+
+Everything else is an environment variable. Two conventions to internalise
+before using them:
+
+- **Most are presence-only** (`qEnvironmentVariableIsSet`), so
+  `AETHER_NO_GPU=0` still forces software rendering. Unset the variable —
+  don't set it to a falsey value.
+- **Two are on by default and act as disable-switches**:
+  `AETHER_WF_GPU_PREVIEW` and `AETHER_RESIZE_LIVE_PREVIEW`. Only
+  `AETHER_DSTAR_VERBOSE_RX_IDLE_DIAG` parses truthiness
+  (`0`/`false`/`no`/`off` are off).
+
+Not to be confused with `AETHER_GPU_SPECTRUM`, which is a **CMake build
+option**, not an environment variable — see `README.md`.
+
+### Agent Automation Bridge
+
+Read [`docs/automation-bridge.md`](docs/automation-bridge.md) first; these are
+the variables it is driven by. `AETHER_AUTOMATION` is the master switch (the
+bridge also starts if it has been persisted in settings).
+
+| Variable | Effect |
+|---|---|
+| `AETHER_AUTOMATION` | Enables the bridge, and switches the instance to a transient automation identity so it does not clobber your normal GUI client identity |
+| `AETHER_AUTOMATION_SOCKET` | `QLocalServer` socket name/path; also identity fallback #2 |
+| `AETHER_AUTOMATION_IDENTITY` | Explicit client identity — first choice of four |
+| `AETHER_AUTOMATION_LABEL` | Identity fallback #3; also feeds the agent name |
+| `AETHER_AUTOMATION_AGENT_NAME` | Agent name reported to the radio |
+| `AETHER_AUTOMATION_STATION` | Station name reported to the radio |
+| `AETHER_AUTOMATION_ALLOW_TX` | Permits transmit-keying verbs. Off by default |
+| `AETHER_AUTOMATION_NO_TX` | Forbids transmit. Evaluated **after** `ALLOW_TX`, so `NO_TX` wins when both are set |
+| `AETHER_AUTOMATION_TX_MAX_MS` | Automation key-down ceiling, milliseconds |
+| `AETHER_AUTOMATION_TX_MAX_POWER` | Automation TX power ceiling |
+| `AETHER_AUTOMATION_READONLY` | Bridge cannot change radio state; also forces the read-only presentation in Radio Setup |
+| `AETHER_AUTOMATION_RAISE` | Lets a backgrounded instance raise/activate its window for native menu popups. Default is no focus-stealing |
+| `AETHER_MCP_TOKEN` | MCP bridge auth token. **Overrides the keychain unconditionally** — the headless/CI path |
+
+The identity chain resolves in order: `IDENTITY` → `SOCKET` → `LABEL` →
+`pid-<N>`.
+
+### Graphics and waterfall
+
+| Variable | Effect |
+|---|---|
+| `AETHER_NO_GPU` | Forces software OpenGL by setting `QT_OPENGL=software`. Works on an already-built binary and avoids GLX/EGL entirely |
+| `AETHER_WF_GPU_PREVIEW` | **On by default**; set `0` to disable the GPU frequency preview |
+| `AETHER_RESIZE_LIVE_PREVIEW` | **On by default**; set `0` to stop presenting live FFT frames during a window resize |
+| `AETHER_WF_KIWI_ALWAYS` | Restores the old unconditional double reprojection pass for KiwiSDR waterfalls — an A/B verification knob |
+| `AETHER_DSS_ROW_SPAN` | Forces waterfall row span (float, clamped to `1.0`…`DssRenderer::kMaxRowSpanFactor`), overriding the slider. Unparseable values fall back to the slider |
+
+### Paths and storage
+
+| Variable | Effect |
+|---|---|
+| `AETHER_SETTINGS_DIR` | Relocates the settings store. Test isolation, and what makes `--config` drivable against a scratch store |
+| `AETHER_PMS_DIR` | Relocates the PMS mailbox store (test isolation; also an ops hook) |
+| `AETHER_WDSP_WISDOM_DIR` | Redirects the FFTW wisdom cache. **Never set by the app** — tests only |
+| `AETHER_NVAFX_DIR` | NVIDIA Audio Effects pack directory, overriding the downloader's cache location |
+
+### Backends, DSP, diagnostics
+
+| Variable | Effect |
+|---|---|
+| `AETHER_ICOM_USERNAME` | Icom username fallback when nothing is stored — for an automation launch on a fresh profile with no dialog to type into |
+| `AETHER_ICOM_PASSWORD` | As above, for the password |
+| `AETHER_WDSP_FFTW_TIMELIMIT` | Bounds the FFTW planner, seconds. A malformed value is ignored rather than treated as `0` |
+| `AETHER_ASR_FORCE_METAL` | Offers Metal ASR acceleration on a non-Apple-Silicon host |
+| `AETHER_NVAFX_DEBUG` | Verbose NVIDIA AFX logging |
+| `AETHER_DSTAR_VERBOSE_RX_IDLE_DIAG` | Verbose D-STAR RX idle diagnostics. Truthy-parsed (see above) |
+| `AETHER_NOMINATIM_BASE_URL` | Overrides the geocoding endpoint. **Non-HTTPS URLs are rejected** |
+
+### Standard variables AetherSDR reads
+
+Not ours, but consulted at startup: `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`, `HOME`, `QT_QPA_PLATFORM`,
+`QT_SCALE_FACTOR`, `QT_D3D_ADAPTER_INDEX`, `LOCALAPPDATA`/`APPDATA`
+(Windows), and for GPU selection `__NV_PRIME_RENDER_OFFLOAD`,
+`__GLX_VENDOR_LIBRARY_NAME`, `DRI_PRIME`. Ordering matters in
+`src/main.cpp`: the `QT_QPA_PLATFORM` block runs **before**
+`GpuSelector::applyAtStartup()`, because the selector reads it to decide
+whether to apply the X11/GLX NVIDIA vendor hint.
